@@ -18,6 +18,8 @@ from watchdog.events import FileSystemEventHandler
 FOLDER_TO_WATCH = "./LDC_Data"
 DATABASE_NAME = "NEA_LDC_Database.db"
 
+# 🚀 CRITICAL FIX: The Color Palette is now globally defined here!
+NEA_PALETTE = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
 def init_db():
     conn = sqlite3.connect(DATABASE_NAME, timeout=30.0)
@@ -45,6 +47,7 @@ def init_db():
         )
     ''')
 
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_sys_date_param ON system_log_data(nepali_year, nepali_month, nepali_day, parameter_name);')
     conn.commit()
     conn.close()
 
@@ -61,12 +64,10 @@ def run_query(query, params=()):
 # ==========================================
 def parse_filename(filename):
     year, month = None, None
-    # 1. Find a 4-digit Nepali Year
     year_match = re.search(r'\b(20[7-9]\d)\b', filename)
     if year_match:
         year = int(year_match.group(1))
 
-        # 2. Look for Month attached to the year (e.g., 2082-10, 10_2082)
         m_after = re.search(rf'{year}[-_.\s]+(1[0-2]|0?[1-9])\b', filename)
         m_before = re.search(rf'\b(1[0-2]|0?[1-9])[-_.\s]+{year}', filename)
 
@@ -75,7 +76,6 @@ def parse_filename(filename):
         elif m_before:
             month = int(m_before.group(1))
         else:
-            # 3. Fallback: Find any 1-2 digit number that isn't the year
             months = re.findall(r'\b(1[0-2]|0?[1-9])\b', filename)
             for m in months:
                 if int(m) != year:
@@ -202,7 +202,6 @@ def process_file(file_path):
         conn = sqlite3.connect(DATABASE_NAME, timeout=30.0)
         cursor = conn.cursor()
 
-        # Track by full file_path so identical filenames in different subfolders don't get skipped
         cursor.execute("SELECT mtime FROM processed_files WHERE filename = ?", (file_path,))
         row = cursor.fetchone()
         if row and row[0] == mtime:
@@ -229,7 +228,6 @@ def process_file(file_path):
         if filename.lower().endswith('.csv'):
             match_day = re.search(r'-\s*(\d+)\.csv$', filename.lower())
             day = int(match_day.group(1)) if match_day else None
-            # STRICT DAY 0 CHECK FOR CSV
             if day is not None and day > 0:
                 df = pd.read_csv(file_io, header=None, encoding='utf-8', on_bad_lines='skip')
                 rows_inserted += extract_data(df, year, month, day, cursor)
@@ -238,8 +236,7 @@ def process_file(file_path):
             for sheet_name in xl.sheet_names:
                 if sheet_name.strip().isdigit():
                     day = int(sheet_name.strip())
-                    # STRICT DAY 0 CHECK FOR EXCEL SHEETS
-                    if day > 0:
+                    if day > 0: 
                         df = xl.parse(sheet_name, header=None)
                         rows_inserted += extract_data(df, year, month, day, cursor)
 
@@ -282,7 +279,6 @@ def start_background_monitor():
         os.makedirs(FOLDER_TO_WATCH)
     event_handler = FileWatcher()
     observer = Observer()
-    # Enables scanning across nested sub-directories
     observer.schedule(event_handler, FOLDER_TO_WATCH, recursive=True)
     monitor_thread = threading.Thread(target=observer.start, daemon=True)
     monitor_thread.start()
@@ -332,16 +328,13 @@ def convert_df(df): return df.to_csv(index=False).encode('utf-8')
 
 
 def update_chart_layout(fig, title, yaxis_title="Power (MW)", xaxis_title="Time", legend_orientation="v"):
-    legend_settings = dict(orientation="v", y=1, x=1.02) if legend_orientation == "v" else dict(orientation="h",
-                                                                                                y=-0.25, x=0,
-                                                                                                yanchor="top")
+    legend_settings = dict(orientation="v", y=1, x=1.02) if legend_orientation == "v" else dict(orientation="h", y=-0.25, x=0, yanchor="top")
     right_margin = 150 if legend_orientation == "v" else 10
-
+    
     fig.update_layout(
         title=title, hovermode="x unified", template="plotly_white",
         plot_bgcolor='rgba(255,255,255,1)', paper_bgcolor='rgba(0,0,0,0)',
-        xaxis=dict(title=xaxis_title, type="category", showgrid=True, gridcolor='#f0f2f6', linecolor='#e0e5ec',
-                   tickangle=-45, automargin=True),
+        xaxis=dict(title=xaxis_title, type="category", showgrid=True, gridcolor='#f0f2f6', linecolor='#e0e5ec', tickangle=-45, automargin=True),
         yaxis=dict(title=yaxis_title, showgrid=True, gridcolor='#f0f2f6', linecolor='#e0e5ec', automargin=True),
         legend=legend_settings, margin=dict(l=10, r=right_margin, t=50, b=60)
     )
@@ -349,20 +342,14 @@ def update_chart_layout(fig, title, yaxis_title="Power (MW)", xaxis_title="Time"
 
 
 def draw_stacked_chart(df_pivot, cols, title, total_col=None, show_export=False, export_col=None):
-    # Palette definition for chart drawing inside loops
-    NEA_PALETTE = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22',
-                   '#17becf']
     fig = go.Figure()
     for i, col in enumerate(cols):
-        fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[col], name=clean_param_name(col), stackgroup='one',
-                                 line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)])))
+        fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[col], name=clean_param_name(col), stackgroup='one', line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)])))
     if show_export and export_col and export_col in df_pivot.columns:
-        fig.add_trace(go.Scatter(x=df_pivot.index, y=-df_pivot[export_col].abs(), name='Total EXPORT', stackgroup='two',
-                                 line=dict(width=0.5, color='#d62728')))
+        fig.add_trace(go.Scatter(x=df_pivot.index, y=-df_pivot[export_col].abs(), name='Total EXPORT', stackgroup='two', line=dict(width=0.5, color='#d62728')))
     if total_col and total_col in df_pivot.columns:
-        fig.add_trace(
-            go.Scatter(x=df_pivot.index, y=df_pivot[total_col], name='TOTAL', line=dict(color='#1e1e1e', width=3)))
-
+        fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[total_col], name='TOTAL', line=dict(color='#1e1e1e', width=3)))
+    
     fig = update_chart_layout(fig, title, legend_orientation="v")
     st.plotly_chart(fig, use_container_width=True)
 
@@ -415,11 +402,9 @@ if years_df.empty:
                         if status == "SKIPPED":
                             skipped_files += 1
                         elif status == "SUCCESS":
-                            new_files += 1;
-                            st.success(message)
+                            new_files += 1; st.success(message)
                         else:
-                            error_files += 1;
-                            st.error(message)
+                            error_files += 1; st.error(message)
 
         st.info(
             f"📊 **Scan Complete:** {new_files} New Files Added | {skipped_files} Previously Recorded Skipped | {error_files} Errors")
@@ -441,11 +426,9 @@ if st.sidebar.button("🚀 Force Manual Scan", use_container_width=True):
                         if status == "SKIPPED":
                             skipped_files += 1
                         elif status == "SUCCESS":
-                            new_files += 1;
-                            st.write(f"✅ {filename}")
+                            new_files += 1; st.write(f"✅ {filename}")
                         else:
-                            error_files += 1;
-                            st.write(f"❌ Error in {filename}")
+                            error_files += 1; st.write(f"❌ Error in {filename}")
 
             status_box.update(label="Scan Complete!", state="complete", expanded=False)
 
@@ -466,12 +449,12 @@ if not years_df.empty:
         "SELECT DISTINCT nepali_month FROM system_log_data WHERE nepali_year = ? ORDER BY nepali_month",
         (selected_year,))
     selected_month = st.sidebar.selectbox("Select Nepali Month", months_df['nepali_month'].tolist())
-
+    
     # DB Filter: Added nepali_day > 0 to ignore old bad data
     days_df = run_query(
         "SELECT DISTINCT nepali_day FROM system_log_data WHERE nepali_year = ? AND nepali_month = ? AND nepali_day > 0 ORDER BY nepali_day",
         (selected_year, selected_month))
-
+        
     if not days_df.empty:
         selected_day = st.sidebar.selectbox("Select Nepali Day", days_df['nepali_day'].tolist())
         sidebar_date_str = f"{selected_year}/{str(selected_month).zfill(2)}/{str(selected_day).zfill(2)}"
@@ -621,7 +604,7 @@ with tab1:
                 raw_supply_components = [
                     p for p in all_db_params
                     if (
-                               'TOTAL' in p.upper() or 'INTERRUPTION' in p.upper() or 'ROR' in p.upper() or 'STORGE' in p.upper() or 'STORAGE' in p.upper())
+                                   'TOTAL' in p.upper() or 'INTERRUPTION' in p.upper() or 'ROR' in p.upper() or 'STORGE' in p.upper() or 'STORAGE' in p.upper())
                        and 'IMPORT' not in p.upper()
                        and 'EXPORT' not in p.upper()
                        and 'LOAD' not in p.upper()
@@ -665,8 +648,7 @@ with tab1:
 
                     # --- ADDING ENERGY AND LOAD FACTOR HERE ---
                     total_energy_mwh = df_pivot['DYNAMIC_SYSTEM_LOAD'].sum()
-                    load_factor = (
-                                df_pivot['DYNAMIC_SYSTEM_LOAD'].mean() / sys_peak_val * 100) if sys_peak_val > 0 else 0
+                    load_factor = (df_pivot['DYNAMIC_SYSTEM_LOAD'].mean() / sys_peak_val * 100) if sys_peak_val > 0 else 0
 
                     st.markdown("<br>", unsafe_allow_html=True)
                     m1, m2, m3, m4 = st.columns(4)
@@ -677,19 +659,15 @@ with tab1:
                     st.markdown("<br>", unsafe_allow_html=True)
 
                     fig_main = go.Figure()
-                    NEA_PALETTE_MAIN = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2',
-                                        '#7f7f7f', '#bcbd22', '#17becf']
 
                     for i, col in enumerate(valid_supply_components):
-                        legend_name = col.replace('SUMMARY_TOTAL_', 'Total ').replace('STORGE', 'Storage').replace(
-                            'Storge',
-                            'Storage')
+                        legend_name = col.replace('SUMMARY_TOTAL_', 'Total ').replace('STORGE', 'Storage').replace('Storge',
+                                                                                                                   'Storage')
                         if col == import_tag: legend_name = "Total IMPORT (Net)"
 
                         fig_main.add_trace(go.Scatter(
                             x=df_pivot.index, y=df_pivot[col], name=legend_name,
-                            stackgroup='supply_stack',
-                            line=dict(width=0.5, color=NEA_PALETTE_MAIN[i % len(NEA_PALETTE_MAIN)]),
+                            stackgroup='supply_stack', line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)]),
                             hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
                         ))
 
@@ -781,8 +759,7 @@ with tab1:
                         hovertemplate='<b>TOTAL SUBSIDIARIES</b>: %{y:.2f} MW<extra></extra>'
                     ))
 
-                    fig_subs = update_chart_layout(fig_subs, "Dynamic Breakdown: NEA Subsidiaries",
-                                                   legend_orientation="v")
+                    fig_subs = update_chart_layout(fig_subs, "Dynamic Breakdown: NEA Subsidiaries", legend_orientation="v")
                     st.plotly_chart(fig_subs, use_container_width=True)
 
                     with st.expander("🔍 View Component Breakdown & Verification"):
