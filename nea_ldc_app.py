@@ -61,11 +61,26 @@ def run_query(query, params=()):
 # ==========================================
 def parse_filename(filename):
     year, month = None, None
-    year_match = re.search(r'(20[7-9]\d)', filename)
-    if year_match: year = int(year_match.group(1))
-    month_match = re.search(r'[-_](1[0-2]|[1-9])[-_]|\b(1[0-2]|[1-9])[-_](?:20[7-9]\d)', filename)
-    if month_match:
-        month = int(month_match.group(1) or month_match.group(2))
+    # 1. Find a 4-digit Nepali Year
+    year_match = re.search(r'\b(20[7-9]\d)\b', filename)
+    if year_match:
+        year = int(year_match.group(1))
+
+        # 2. Look for Month attached to the year (e.g., 2082-10, 10_2082)
+        m_after = re.search(rf'{year}[-_.\s]+(1[0-2]|0?[1-9])\b', filename)
+        m_before = re.search(rf'\b(1[0-2]|0?[1-9])[-_.\s]+{year}', filename)
+
+        if m_after:
+            month = int(m_after.group(1))
+        elif m_before:
+            month = int(m_before.group(1))
+        else:
+            # 3. Fallback: Find any 1-2 digit number that isn't the year
+            months = re.findall(r'\b(1[0-2]|0?[1-9])\b', filename)
+            for m in months:
+                if int(m) != year:
+                    month = int(m)
+                    break
     return year, month
 
 
@@ -84,14 +99,14 @@ def extract_data(df, year, month, day, cursor):
             str_val = str(val).strip()
             match = re.search(r'\b(\d{1,2}):(\d{2})', str_val)
             if match:
-                hr = int(match.group(1));
+                hr = int(match.group(1))
                 mnt = int(match.group(2))
                 current_time_cols[col_idx] = f"{hr:02d}:{mnt:02d}:00"
             else:
                 try:
                     num = float(val)
                     if 0 < num <= 24:
-                        hr = int(num);
+                        hr = int(num)
                         mnt = int(round((num - hr) * 60))
                         current_time_cols[col_idx] = f"{hr:02d}:{mnt:02d}:00"
                 except:
@@ -187,7 +202,8 @@ def process_file(file_path):
         conn = sqlite3.connect(DATABASE_NAME, timeout=30.0)
         cursor = conn.cursor()
 
-        cursor.execute("SELECT mtime FROM processed_files WHERE filename = ?", (filename,))
+        # Track by full file_path so identical filenames in different subfolders don't get skipped
+        cursor.execute("SELECT mtime FROM processed_files WHERE filename = ?", (file_path,))
         row = cursor.fetchone()
         if row and row[0] == mtime:
             conn.close()
@@ -212,29 +228,34 @@ def process_file(file_path):
         rows_inserted = 0
         if filename.lower().endswith('.csv'):
             match_day = re.search(r'-\s*(\d+)\.csv$', filename.lower())
-            day = int(match_day.group(1)) if match_day else 1
-            df = pd.read_csv(file_io, header=None, encoding='utf-8', on_bad_lines='skip')
-            rows_inserted += extract_data(df, year, month, day, cursor)
+            day = int(match_day.group(1)) if match_day else None
+            # STRICT DAY 0 CHECK FOR CSV
+            if day is not None and day > 0:
+                df = pd.read_csv(file_io, header=None, encoding='utf-8', on_bad_lines='skip')
+                rows_inserted += extract_data(df, year, month, day, cursor)
         else:
             xl = pd.ExcelFile(file_io, engine='openpyxl' if filename.endswith('.xlsx') else None)
             for sheet_name in xl.sheet_names:
                 if sheet_name.strip().isdigit():
                     day = int(sheet_name.strip())
-                    df = xl.parse(sheet_name, header=None)
-                    rows_inserted += extract_data(df, year, month, day, cursor)
+                    # STRICT DAY 0 CHECK FOR EXCEL SHEETS
+                    if day > 0:
+                        df = xl.parse(sheet_name, header=None)
+                        rows_inserted += extract_data(df, year, month, day, cursor)
 
         if rows_inserted > 0:
             cursor.execute('''
                 INSERT INTO processed_files (filename, mtime) 
                 VALUES (?, ?) ON CONFLICT(filename) DO UPDATE SET mtime=excluded.mtime
-            ''', (filename, mtime))
+            ''', (file_path, mtime))
             conn.commit()
             conn.close()
+            st.cache_data.clear()
             return "SUCCESS", f"✅ Added `{filename}` (Year {year}, Month {month})."
         else:
             conn.commit()
             conn.close()
-            return "ERROR", f"No matching grid data found inside `{filename}`."
+            return "ERROR", f"No valid day sheets found inside `{filename}`."
 
     except Exception as e:
         return "ERROR", f"Error reading `{filename}`: {str(e)}"
@@ -261,7 +282,8 @@ def start_background_monitor():
         os.makedirs(FOLDER_TO_WATCH)
     event_handler = FileWatcher()
     observer = Observer()
-    observer.schedule(event_handler, FOLDER_TO_WATCH, recursive=False)
+    # Enables scanning across nested sub-directories
+    observer.schedule(event_handler, FOLDER_TO_WATCH, recursive=True)
     monitor_thread = threading.Thread(target=observer.start, daemon=True)
     monitor_thread.start()
     return observer
@@ -305,6 +327,46 @@ def clean_param_name(p):
         'ZONE_NEASUB_', 'SUB: ').replace('ZONE_IMPORT_', 'IMPORT: ').replace('ZONE_EXPORT_', 'EXPORT: ')
 
 
+@st.cache_data(show_spinner=False)
+def convert_df(df): return df.to_csv(index=False).encode('utf-8')
+
+
+def update_chart_layout(fig, title, yaxis_title="Power (MW)", xaxis_title="Time", legend_orientation="v"):
+    legend_settings = dict(orientation="v", y=1, x=1.02) if legend_orientation == "v" else dict(orientation="h",
+                                                                                                y=-0.25, x=0,
+                                                                                                yanchor="top")
+    right_margin = 150 if legend_orientation == "v" else 10
+
+    fig.update_layout(
+        title=title, hovermode="x unified", template="plotly_white",
+        plot_bgcolor='rgba(255,255,255,1)', paper_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(title=xaxis_title, type="category", showgrid=True, gridcolor='#f0f2f6', linecolor='#e0e5ec',
+                   tickangle=-45, automargin=True),
+        yaxis=dict(title=yaxis_title, showgrid=True, gridcolor='#f0f2f6', linecolor='#e0e5ec', automargin=True),
+        legend=legend_settings, margin=dict(l=10, r=right_margin, t=50, b=60)
+    )
+    return fig
+
+
+def draw_stacked_chart(df_pivot, cols, title, total_col=None, show_export=False, export_col=None):
+    # Palette definition for chart drawing inside loops
+    NEA_PALETTE = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22',
+                   '#17becf']
+    fig = go.Figure()
+    for i, col in enumerate(cols):
+        fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[col], name=clean_param_name(col), stackgroup='one',
+                                 line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)])))
+    if show_export and export_col and export_col in df_pivot.columns:
+        fig.add_trace(go.Scatter(x=df_pivot.index, y=-df_pivot[export_col].abs(), name='Total EXPORT', stackgroup='two',
+                                 line=dict(width=0.5, color='#d62728')))
+    if total_col and total_col in df_pivot.columns:
+        fig.add_trace(
+            go.Scatter(x=df_pivot.index, y=df_pivot[total_col], name='TOTAL', line=dict(color='#1e1e1e', width=3)))
+
+    fig = update_chart_layout(fig, title, legend_orientation="v")
+    st.plotly_chart(fig, use_container_width=True)
+
+
 st.set_page_config(page_title="NEA LDC Dashboard", layout="wide", initial_sidebar_state="expanded")
 st.markdown("""
     <style>
@@ -344,17 +406,20 @@ if years_df.empty:
     if st.button("🚀 Force Manual Scan (Scan All Files)"):
         new_files, skipped_files, error_files = 0, 0, 0
         if os.path.exists(FOLDER_TO_WATCH):
-            for filename in os.listdir(FOLDER_TO_WATCH):
-                if filename.lower().endswith(('.xlsx', '.xls', '.csv')) and not filename.startswith('~'):
-                    file_path = os.path.join(FOLDER_TO_WATCH, filename)
-                    st.write(f"Checking `{filename}`...")
-                    status, message = process_file(file_path)
-                    if status == "SKIPPED":
-                        skipped_files += 1
-                    elif status == "SUCCESS":
-                        new_files += 1; st.success(message)
-                    else:
-                        error_files += 1; st.error(message)
+            for root, dirs, files in os.walk(FOLDER_TO_WATCH):
+                for filename in files:
+                    if filename.lower().endswith(('.xlsx', '.xls', '.csv')) and not filename.startswith('~'):
+                        file_path = os.path.join(root, filename)
+                        st.write(f"Checking `{filename}`...")
+                        status, message = process_file(file_path)
+                        if status == "SKIPPED":
+                            skipped_files += 1
+                        elif status == "SUCCESS":
+                            new_files += 1;
+                            st.success(message)
+                        else:
+                            error_files += 1;
+                            st.error(message)
 
         st.info(
             f"📊 **Scan Complete:** {new_files} New Files Added | {skipped_files} Previously Recorded Skipped | {error_files} Errors")
@@ -368,16 +433,19 @@ if st.sidebar.button("🚀 Force Manual Scan", use_container_width=True):
     new_files, skipped_files, error_files = 0, 0, 0
     if os.path.exists(FOLDER_TO_WATCH):
         with st.sidebar.status("Scanning Folder...", expanded=True) as status_box:
-            for filename in os.listdir(FOLDER_TO_WATCH):
-                if filename.lower().endswith(('.xlsx', '.xls', '.csv')) and not filename.startswith('~'):
-                    file_path = os.path.join(FOLDER_TO_WATCH, filename)
-                    status, message = process_file(file_path)
-                    if status == "SKIPPED":
-                        skipped_files += 1
-                    elif status == "SUCCESS":
-                        new_files += 1; st.write(f"✅ {filename}")
-                    else:
-                        error_files += 1; st.write(f"❌ Error in {filename}")
+            for root, dirs, files in os.walk(FOLDER_TO_WATCH):
+                for filename in files:
+                    if filename.lower().endswith(('.xlsx', '.xls', '.csv')) and not filename.startswith('~'):
+                        file_path = os.path.join(root, filename)
+                        status, message = process_file(file_path)
+                        if status == "SKIPPED":
+                            skipped_files += 1
+                        elif status == "SUCCESS":
+                            new_files += 1;
+                            st.write(f"✅ {filename}")
+                        else:
+                            error_files += 1;
+                            st.write(f"❌ Error in {filename}")
 
             status_box.update(label="Scan Complete!", state="complete", expanded=False)
 
@@ -398,12 +466,19 @@ if not years_df.empty:
         "SELECT DISTINCT nepali_month FROM system_log_data WHERE nepali_year = ? ORDER BY nepali_month",
         (selected_year,))
     selected_month = st.sidebar.selectbox("Select Nepali Month", months_df['nepali_month'].tolist())
-    days_df = run_query(
-        "SELECT DISTINCT nepali_day FROM system_log_data WHERE nepali_year = ? AND nepali_month = ? ORDER BY nepali_day",
-        (selected_year, selected_month))
-    selected_day = st.sidebar.selectbox("Select Nepali Day", days_df['nepali_day'].tolist())
 
-sidebar_date_str = f"{selected_year}/{str(selected_month).zfill(2)}/{str(selected_day).zfill(2)}"
+    # DB Filter: Added nepali_day > 0 to ignore old bad data
+    days_df = run_query(
+        "SELECT DISTINCT nepali_day FROM system_log_data WHERE nepali_year = ? AND nepali_month = ? AND nepali_day > 0 ORDER BY nepali_day",
+        (selected_year, selected_month))
+
+    if not days_df.empty:
+        selected_day = st.sidebar.selectbox("Select Nepali Day", days_df['nepali_day'].tolist())
+        sidebar_date_str = f"{selected_year}/{str(selected_month).zfill(2)}/{str(selected_day).zfill(2)}"
+    else:
+        selected_day = None
+        sidebar_date_str = "No valid days found"
+        st.sidebar.warning("No valid day data for this month.")
 
 # --- TAB 4 SPECIFIC SIDEBAR CONTROLS ---
 st.sidebar.divider()
@@ -434,7 +509,8 @@ if compare_mode == "🗓️ Date-wise":
             comp_param = st.sidebar.selectbox("2. Select Specific Parameter", filtered_params, index=default_param_idx,
                                               format_func=clean_param_name)
 
-            dates_query = "SELECT DISTINCT nepali_year, nepali_month, nepali_day FROM system_log_data WHERE parameter_name = ? ORDER BY nepali_year DESC, nepali_month DESC, nepali_day DESC"
+            # DB Filter: Added nepali_day > 0
+            dates_query = "SELECT DISTINCT nepali_year, nepali_month, nepali_day FROM system_log_data WHERE parameter_name = ? AND nepali_day > 0 ORDER BY nepali_year DESC, nepali_month DESC, nepali_day DESC"
             dates_df = run_query(dates_query, (comp_param,))
 
             if not dates_df.empty:
@@ -450,27 +526,30 @@ if compare_mode == "🗓️ Date-wise":
         comp_param, selected_comp_days = None, []
 
 elif compare_mode == "📈 Parameters":
-    params_avail = run_query(
-        "SELECT DISTINCT parameter_name FROM system_log_data WHERE nepali_year=? AND nepali_month=? AND nepali_day=?",
-        (selected_year, selected_month, selected_day))
-    if not params_avail.empty:
-        param_list = params_avail['parameter_name'].tolist()
-        categorized = categorize_params(param_list)
-        cat_options = sorted(list(categorized.keys()))
+    if selected_day:
+        params_avail = run_query(
+            "SELECT DISTINCT parameter_name FROM system_log_data WHERE nepali_year=? AND nepali_month=? AND nepali_day=?",
+            (selected_year, selected_month, selected_day))
+        if not params_avail.empty:
+            param_list = params_avail['parameter_name'].tolist()
+            categorized = categorize_params(param_list)
+            cat_options = sorted(list(categorized.keys()))
 
-        selected_cats = st.sidebar.multiselect("1. Filter Categories", cat_options, default=cat_options)
+            selected_cats = st.sidebar.multiselect("1. Filter Categories", cat_options, default=cat_options)
 
-        if selected_cats:
-            filtered_params = sorted([p for cat in selected_cats for p in categorized[cat]])
-            default_param_idx = filtered_params.index(
-                'TOTAL SYSTEM LOAD (ACTUAL)') if 'TOTAL SYSTEM LOAD (ACTUAL)' in filtered_params else (
-                filtered_params.index('SUMMARY_TOTAL_IMPORT') if 'SUMMARY_TOTAL_IMPORT' in filtered_params else 0)
-            baseline_param = st.sidebar.selectbox("2. BASELINE Parameter", filtered_params, index=default_param_idx,
-                                                  format_func=clean_param_name)
+            if selected_cats:
+                filtered_params = sorted([p for cat in selected_cats for p in categorized[cat]])
+                default_param_idx = filtered_params.index(
+                    'TOTAL SYSTEM LOAD (ACTUAL)') if 'TOTAL SYSTEM LOAD (ACTUAL)' in filtered_params else (
+                    filtered_params.index('SUMMARY_TOTAL_IMPORT') if 'SUMMARY_TOTAL_IMPORT' in filtered_params else 0)
+                baseline_param = st.sidebar.selectbox("2. BASELINE Parameter", filtered_params, index=default_param_idx,
+                                                      format_func=clean_param_name)
 
-            comp_list = [p for p in filtered_params if p != baseline_param]
-            selected_comp_params = st.sidebar.multiselect("3. Additional Parameters to Overlay", comp_list,
-                                                          format_func=clean_param_name)
+                comp_list = [p for p in filtered_params if p != baseline_param]
+                selected_comp_params = st.sidebar.multiselect("3. Additional Parameters to Overlay", comp_list,
+                                                              format_func=clean_param_name)
+            else:
+                baseline_param, selected_comp_params = None, []
         else:
             baseline_param, selected_comp_params = None, []
     else:
@@ -501,6 +580,7 @@ elif compare_mode in ["📅 Daily Peak/Load Across Months", "📊 Monthly Peak/L
                 ym_df['Formatted_YM'] = ym_df['nepali_year'].astype(str) + "/" + ym_df['nepali_month'].astype(
                     str).str.zfill(2)
                 ym_list = ym_df['Formatted_YM'].tolist()
+
                 selected_comp_months = st.sidebar.multiselect("3. Select Months to Compare (First is Baseline)",
                                                               ym_list, default=ym_list[:min(2, len(ym_list))])
             else:
@@ -520,341 +600,315 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "🔍 Comparison Studio"
 ])
 
-
-# 🚀 CRITICAL FIX: Smart Layout Engine prevents overlap by orienting legends vertically for heavy tabs
-def update_chart_layout(fig, title, yaxis_title="Power (MW)", xaxis_title="Time", legend_orientation="v"):
-    # If vertical, put legend cleanly on the right with a scrollbar. If horizontal, put it below the chart.
-    legend_settings = dict(orientation="v", y=1, x=1.02) if legend_orientation == "v" else dict(orientation="h",
-                                                                                                y=-0.25, x=0,
-                                                                                                yanchor="top")
-    right_margin = 150 if legend_orientation == "v" else 10
-
-    fig.update_layout(
-        title=title,
-        hovermode="x unified",
-        template="plotly_white",
-        plot_bgcolor='rgba(255,255,255,1)',
-        paper_bgcolor='rgba(0,0,0,0)',
-        xaxis=dict(
-            title=xaxis_title,
-            type="category",
-            showgrid=True,
-            gridcolor='#f0f2f6',
-            linecolor='#e0e5ec',
-            tickangle=-45,  # Tilts labels to prevent horizontal overlap
-            automargin=True  # Auto-expands margin to protect the title
-        ),
-        yaxis=dict(
-            title=yaxis_title,
-            showgrid=True,
-            gridcolor='#f0f2f6',
-            linecolor='#e0e5ec',
-            automargin=True
-        ),
-        legend=legend_settings,
-        margin=dict(l=10, r=right_margin, t=50, b=60)  # Generous bottom padding
-    )
-    return fig
-
-
 with tab1:
     sub_tab_main, sub_tab_import, sub_tab_subs, sub_tab_ipp, sub_tab_ror, sub_tab_storage = st.tabs([
         "Main System", "Total IMPORT", "Total NEA SUBSIDIARIES", "Total IPP", "Total ROR", "Total STORAGE"
     ])
 
-    query_all = '''
-        SELECT time_interval as Time, parameter_name, value as MW
-        FROM system_log_data
-        WHERE nepali_year = ? AND nepali_month = ? AND nepali_day = ?
-        ORDER BY time_interval ASC
-    '''
-    df_all = run_query(query_all, (selected_year, selected_month, selected_day))
+    if selected_day:
+        query_all = '''
+            SELECT time_interval as Time, parameter_name, value as MW
+            FROM system_log_data
+            WHERE nepali_year = ? AND nepali_month = ? AND nepali_day = ?
+            ORDER BY time_interval ASC
+        '''
+        df_all = run_query(query_all, (selected_year, selected_month, selected_day))
 
-    if not df_all.empty:
-        # --- SUB-TAB: MAIN SYSTEM ---
-        with sub_tab_main:
-            all_db_params = df_all['parameter_name'].unique()
-            raw_supply_components = [
-                p for p in all_db_params
-                if (
+        if not df_all.empty:
+            # --- SUB-TAB: MAIN SYSTEM ---
+            with sub_tab_main:
+                all_db_params = df_all['parameter_name'].unique()
+                raw_supply_components = [
+                    p for p in all_db_params
+                    if (
                                'TOTAL' in p.upper() or 'INTERRUPTION' in p.upper() or 'ROR' in p.upper() or 'STORGE' in p.upper() or 'STORAGE' in p.upper())
-                   and 'IMPORT' not in p.upper()
-                   and 'EXPORT' not in p.upper()
-                   and 'LOAD' not in p.upper()
-                   and 'OTHER IPP' not in p.upper()
-                   and 'ZONE_' not in p.upper()
-            ]
+                       and 'IMPORT' not in p.upper()
+                       and 'EXPORT' not in p.upper()
+                       and 'LOAD' not in p.upper()
+                       and 'OTHER IPP' not in p.upper()
+                       and 'ZONE_' not in p.upper()
+                ]
 
-            import_tag = 'SUMMARY_TOTAL_IMPORT'
-            export_tag = 'SUMMARY_TOTAL_EXPORT'
+                import_tag = 'SUMMARY_TOTAL_IMPORT'
+                export_tag = 'SUMMARY_TOTAL_EXPORT'
 
-            required_params = raw_supply_components.copy()
-            if import_tag in all_db_params: required_params.append(import_tag)
-            if export_tag in all_db_params: required_params.append(export_tag)
+                required_params = raw_supply_components.copy()
+                if import_tag in all_db_params: required_params.append(import_tag)
+                if export_tag in all_db_params: required_params.append(export_tag)
 
-            df_summary = df_all[df_all['parameter_name'].isin(required_params)].copy()
+                df_summary = df_all[df_all['parameter_name'].isin(required_params)].copy()
 
-            if not df_summary.empty:
-                df_pivot = df_summary.pivot(index='Time', columns='parameter_name', values='MW').fillna(0.0)
-                df_pivot = df_pivot.sort_index()
+                if not df_summary.empty:
+                    df_pivot = df_summary.pivot(index='Time', columns='parameter_name', values='MW').fillna(0.0)
+                    df_pivot = df_pivot.sort_index()
 
-                valid_supply_components = []
-                for col in raw_supply_components:
-                    if col in df_pivot.columns:
-                        if df_pivot[col].abs().sum() > 0 or 'STORGE' in col.upper() or 'STORAGE' in col.upper():
-                            valid_supply_components.append(col)
+                    valid_supply_components = []
+                    for col in raw_supply_components:
+                        if col in df_pivot.columns:
+                            if df_pivot[col].abs().sum() > 0 or 'STORGE' in col.upper() or 'STORAGE' in col.upper():
+                                valid_supply_components.append(col)
 
-                if import_tag in df_pivot.columns and import_tag not in valid_supply_components:
-                    valid_supply_components.append(import_tag)
+                    if import_tag in df_pivot.columns and import_tag not in valid_supply_components:
+                        valid_supply_components.append(import_tag)
 
-                if export_tag not in df_pivot.columns: df_pivot[export_tag] = 0.0
-                if import_tag not in df_pivot.columns: df_pivot[import_tag] = 0.0
+                    if export_tag not in df_pivot.columns: df_pivot[export_tag] = 0.0
+                    if import_tag not in df_pivot.columns: df_pivot[import_tag] = 0.0
 
-                df_pivot[import_tag] = df_pivot[import_tag] - df_pivot[export_tag].abs()
-                df_pivot['DYNAMIC_NATIONAL_LOAD'] = df_pivot[valid_supply_components].sum(axis=1)
-                df_pivot['DYNAMIC_SYSTEM_LOAD'] = df_pivot['DYNAMIC_NATIONAL_LOAD'] + df_pivot[export_tag].abs()
+                    df_pivot[import_tag] = df_pivot[import_tag] - df_pivot[export_tag].abs()
+                    df_pivot['DYNAMIC_NATIONAL_LOAD'] = df_pivot[valid_supply_components].sum(axis=1)
+                    df_pivot['DYNAMIC_SYSTEM_LOAD'] = df_pivot['DYNAMIC_NATIONAL_LOAD'] + df_pivot[export_tag].abs()
 
-                sys_peak_hour = df_pivot['DYNAMIC_SYSTEM_LOAD'].idxmax()
-                sys_peak_val = df_pivot.loc[sys_peak_hour, 'DYNAMIC_SYSTEM_LOAD']
-                nat_peak_hour = df_pivot['DYNAMIC_NATIONAL_LOAD'].idxmax()
-                nat_peak_val = df_pivot.loc[nat_peak_hour, 'DYNAMIC_NATIONAL_LOAD']
+                    sys_peak_hour = df_pivot['DYNAMIC_SYSTEM_LOAD'].idxmax()
+                    sys_peak_val = df_pivot.loc[sys_peak_hour, 'DYNAMIC_SYSTEM_LOAD']
+                    nat_peak_hour = df_pivot['DYNAMIC_NATIONAL_LOAD'].idxmax()
+                    nat_peak_val = df_pivot.loc[nat_peak_hour, 'DYNAMIC_NATIONAL_LOAD']
 
-                st.markdown("<br>", unsafe_allow_html=True)
-                m1, m2 = st.columns(2)
-                m1.metric(f"📈 Max System Load (at {sys_peak_hour})", f"{sys_peak_val:.2f} MW")
-                m2.metric(f"📊 Max National Peak (at {nat_peak_hour})", f"{nat_peak_val:.2f} MW")
-                st.markdown("<br>", unsafe_allow_html=True)
+                    # --- ADDING ENERGY AND LOAD FACTOR HERE ---
+                    total_energy_mwh = df_pivot['DYNAMIC_SYSTEM_LOAD'].sum()
+                    load_factor = (
+                                df_pivot['DYNAMIC_SYSTEM_LOAD'].mean() / sys_peak_val * 100) if sys_peak_val > 0 else 0
 
-                fig_main = go.Figure()
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric(f"📈 Max Sys Load ({sys_peak_hour})", f"{sys_peak_val:.2f} MW")
+                    m2.metric(f"📊 Max Nat Peak ({nat_peak_hour})", f"{nat_peak_val:.2f} MW")
+                    m3.metric(f"⚡ Total Energy", f"{total_energy_mwh:,.0f} MWh")
+                    m4.metric(f"⚙️ Load Factor", f"{load_factor:.1f}%")
+                    st.markdown("<br>", unsafe_allow_html=True)
 
-                for col in valid_supply_components:
-                    legend_name = col.replace('SUMMARY_TOTAL_', 'Total ').replace('STORGE', 'Storage').replace('Storge',
-                                                                                                               'Storage')
-                    if col == import_tag: legend_name = "Total IMPORT (Net)"
+                    fig_main = go.Figure()
+                    NEA_PALETTE_MAIN = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2',
+                                        '#7f7f7f', '#bcbd22', '#17becf']
+
+                    for i, col in enumerate(valid_supply_components):
+                        legend_name = col.replace('SUMMARY_TOTAL_', 'Total ').replace('STORGE', 'Storage').replace(
+                            'Storge',
+                            'Storage')
+                        if col == import_tag: legend_name = "Total IMPORT (Net)"
+
+                        fig_main.add_trace(go.Scatter(
+                            x=df_pivot.index, y=df_pivot[col], name=legend_name,
+                            stackgroup='supply_stack',
+                            line=dict(width=0.5, color=NEA_PALETTE_MAIN[i % len(NEA_PALETTE_MAIN)]),
+                            hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
+                        ))
+
+                    if df_pivot[export_tag].abs().sum() > 0:
+                        fig_main.add_trace(go.Scatter(
+                            x=df_pivot.index, y=-df_pivot[export_tag].abs(),
+                            name='Total EXPORT', stackgroup='export_stack',
+                            line=dict(width=0.5, color='#d62728'),
+                            hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
+                        ))
 
                     fig_main.add_trace(go.Scatter(
-                        x=df_pivot.index, y=df_pivot[col], name=legend_name,
-                        stackgroup='supply_stack', line=dict(width=0.5),
-                        hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
+                        x=df_pivot.index, y=df_pivot['DYNAMIC_SYSTEM_LOAD'],
+                        name='SYSTEM LOAD', line=dict(color='#ff3366', width=2.5, dash='dot')
                     ))
 
-                if df_pivot[export_tag].abs().sum() > 0:
                     fig_main.add_trace(go.Scatter(
-                        x=df_pivot.index, y=-df_pivot[export_tag].abs(),
-                        name='Total EXPORT', stackgroup='export_stack',
-                        line=dict(width=0.5),
-                        hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
+                        x=df_pivot.index, y=df_pivot['DYNAMIC_NATIONAL_LOAD'],
+                        name='NATIONAL LOAD', line=dict(color='#1e1e1e', width=3)
                     ))
 
-                fig_main.add_trace(go.Scatter(
-                    x=df_pivot.index, y=df_pivot['DYNAMIC_SYSTEM_LOAD'],
-                    name='SYSTEM LOAD', line=dict(color='#ff3366', width=2.5, dash='dot')
-                ))
+                    fig_main = update_chart_layout(fig_main, "System Operation & Load Curve", legend_orientation="v")
+                    fig_main.add_hline(y=0, line_width=2, line_color="#1e1e1e")
+                    st.plotly_chart(fig_main, use_container_width=True)
 
-                fig_main.add_trace(go.Scatter(
-                    x=df_pivot.index, y=df_pivot['DYNAMIC_NATIONAL_LOAD'],
-                    name='NATIONAL LOAD', line=dict(color='#1e1e1e', width=3)
-                ))
+                    with st.expander("🔍 View Filtered Supply Components & Loads"):
+                        display_cols = ['DYNAMIC_SYSTEM_LOAD', 'DYNAMIC_NATIONAL_LOAD'] + valid_supply_components + [
+                            export_tag]
+                        st.dataframe(df_pivot[display_cols].style.format("{:.2f}"), use_container_width=True)
+                else:
+                    st.info("No system summary data found.")
 
-                fig_main = update_chart_layout(fig_main, "System Operation & Load Curve", legend_orientation="v")
-                fig_main.add_hline(y=0, line_width=2, line_color="#1e1e1e")
-                st.plotly_chart(fig_main, use_container_width=True)
+            # --- SUB-TAB: TOTAL IMPORT ---
+            with sub_tab_import:
+                df_imp = df_all[df_all['parameter_name'].str.startswith('ZONE_IMPORT_', na=False)].copy()
 
-                with st.expander("🔍 View Filtered Supply Components & Loads"):
-                    display_cols = ['DYNAMIC_SYSTEM_LOAD', 'DYNAMIC_NATIONAL_LOAD'] + valid_supply_components + [
-                        export_tag]
-                    st.dataframe(df_pivot[display_cols].style.format("{:.2f}"), use_container_width=True)
-            else:
-                st.info("No system summary data found.")
+                if not df_imp.empty:
+                    df_imp['Display_Name'] = df_imp['parameter_name'].str.replace('ZONE_IMPORT_', '')
+                    df_pivot = df_imp.pivot(index='Time', columns='Display_Name', values='MW').fillna(0)
+                    df_pivot = df_pivot.sort_index()
+                    df_pivot['CALCULATED_TOTAL'] = df_pivot.sum(axis=1)
 
-        # --- SUB-TAB: TOTAL IMPORT ---
-        with sub_tab_import:
-            df_imp = df_all[df_all['parameter_name'].str.startswith('ZONE_IMPORT_', na=False)].copy()
+                    fig = go.Figure()
+                    for col in df_pivot.columns:
+                        if col == 'CALCULATED_TOTAL': continue
+                        fig.add_trace(go.Scatter(
+                            x=df_pivot.index, y=df_pivot[col], name=col,
+                            stackgroup='import_flow', line=dict(width=1),
+                            hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
+                        ))
 
-            if not df_imp.empty:
-                df_imp['Display_Name'] = df_imp['parameter_name'].str.replace('ZONE_IMPORT_', '')
-                df_pivot = df_imp.pivot(index='Time', columns='Display_Name', values='MW').fillna(0)
-                df_pivot = df_pivot.sort_index()
-                df_pivot['CALCULATED_TOTAL'] = df_pivot.sum(axis=1)
-
-                fig = go.Figure()
-                for col in df_pivot.columns:
-                    if col == 'CALCULATED_TOTAL': continue
                     fig.add_trace(go.Scatter(
-                        x=df_pivot.index, y=df_pivot[col], name=col,
-                        stackgroup='import_flow', line=dict(width=1),
-                        hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
+                        x=df_pivot.index, y=df_pivot['CALCULATED_TOTAL'],
+                        name='TOTAL IMPORT', line=dict(color='#1e1e1e', width=3),
+                        hovertemplate='<b>TOTAL</b>: %{y:.2f} MW<extra></extra>'
                     ))
 
-                fig.add_trace(go.Scatter(
-                    x=df_pivot.index, y=df_pivot['CALCULATED_TOTAL'],
-                    name='TOTAL IMPORT', line=dict(color='#1e1e1e', width=3),
-                    hovertemplate='<b>TOTAL</b>: %{y:.2f} MW<extra></extra>'
-                ))
+                    fig = update_chart_layout(fig, "Dynamic Breakdown: Import & Export",
+                                              yaxis_title="MW (+Import / -Export)", legend_orientation="v")
+                    fig.add_hline(y=0, line_width=2, line_color="#1e1e1e")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No Import zone data found.")
 
-                fig = update_chart_layout(fig, "Dynamic Breakdown: Import & Export",
-                                          yaxis_title="MW (+Import / -Export)", legend_orientation="v")
-                fig.add_hline(y=0, line_width=2, line_color="#1e1e1e")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No Import zone data found.")
+            # --- SUB-TAB: TOTAL NEA SUBSIDIARIES ---
+            with sub_tab_subs:
+                zone_prefix = 'ZONE_NEASUB_'
+                df_subs = df_all[df_all['parameter_name'].str.startswith(zone_prefix, na=False)].copy()
 
-        # --- SUB-TAB: TOTAL NEA SUBSIDIARIES ---
-        with sub_tab_subs:
-            zone_prefix = 'ZONE_NEASUB_'
-            df_subs = df_all[df_all['parameter_name'].str.startswith(zone_prefix, na=False)].copy()
+                if not df_subs.empty:
+                    df_subs['Display_Name'] = df_subs['parameter_name'].str.replace(zone_prefix, '')
+                    df_pivot = df_subs.pivot(index='Time', columns='Display_Name', values='MW').fillna(0.0)
+                    df_pivot = df_pivot.sort_index()
 
-            if not df_subs.empty:
-                df_subs['Display_Name'] = df_subs['parameter_name'].str.replace(zone_prefix, '')
-                df_pivot = df_subs.pivot(index='Time', columns='Display_Name', values='MW').fillna(0.0)
-                df_pivot = df_pivot.sort_index()
+                    valid_cols = [c for c in df_pivot.columns if df_pivot[c].abs().sum() > 0]
+                    df_pivot['CALCULATED_TOTAL'] = df_pivot[valid_cols].sum(axis=1)
 
-                valid_cols = [c for c in df_pivot.columns if df_pivot[c].abs().sum() > 0]
-                df_pivot['CALCULATED_TOTAL'] = df_pivot[valid_cols].sum(axis=1)
+                    fig_subs = go.Figure()
+                    for i, col in enumerate(valid_cols):
+                        fig_subs.add_trace(go.Scatter(
+                            x=df_pivot.index, y=df_pivot[col], name=col,
+                            stackgroup='subs_stack', line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)]),
+                            hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
+                        ))
 
-                fig_subs = go.Figure()
-                for col in valid_cols:
                     fig_subs.add_trace(go.Scatter(
-                        x=df_pivot.index, y=df_pivot[col], name=col,
-                        stackgroup='subs_stack', line=dict(width=0.5),
-                        hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
+                        x=df_pivot.index, y=df_pivot['CALCULATED_TOTAL'],
+                        name='CALCULATED TOTAL', line=dict(color='#1e1e1e', width=3),
+                        hovertemplate='<b>TOTAL SUBSIDIARIES</b>: %{y:.2f} MW<extra></extra>'
                     ))
 
-                fig_subs.add_trace(go.Scatter(
-                    x=df_pivot.index, y=df_pivot['CALCULATED_TOTAL'],
-                    name='CALCULATED TOTAL', line=dict(color='#1e1e1e', width=3),
-                    hovertemplate='<b>TOTAL SUBSIDIARIES</b>: %{y:.2f} MW<extra></extra>'
-                ))
+                    fig_subs = update_chart_layout(fig_subs, "Dynamic Breakdown: NEA Subsidiaries",
+                                                   legend_orientation="v")
+                    st.plotly_chart(fig_subs, use_container_width=True)
 
-                fig_subs = update_chart_layout(fig_subs, "Dynamic Breakdown: NEA Subsidiaries", legend_orientation="v")
-                st.plotly_chart(fig_subs, use_container_width=True)
+                    with st.expander("🔍 View Component Breakdown & Verification"):
+                        st.dataframe(df_pivot[valid_cols + ['CALCULATED_TOTAL']].style.format("{:.2f}"),
+                                     use_container_width=True)
+                else:
+                    st.info("No rows found in the NEA Subsidiaries zone.")
 
-                with st.expander("🔍 View Component Breakdown & Verification"):
-                    st.dataframe(df_pivot[valid_cols + ['CALCULATED_TOTAL']].style.format("{:.2f}"),
-                                 use_container_width=True)
-            else:
-                st.info("No rows found in the NEA Subsidiaries zone.")
+            # --- SUB-TAB: TOTAL IPP ---
+            with sub_tab_ipp:
+                zone_prefix = 'ZONE_IPP_'
+                df_ipp = df_all[df_all['parameter_name'].str.startswith(zone_prefix, na=False)].copy()
 
-        # --- SUB-TAB: TOTAL IPP ---
-        with sub_tab_ipp:
-            zone_prefix = 'ZONE_IPP_'
-            df_ipp = df_all[df_all['parameter_name'].str.startswith(zone_prefix, na=False)].copy()
+                if not df_ipp.empty:
+                    df_ipp['Display_Name'] = df_ipp['parameter_name'].str.replace(zone_prefix, '')
+                    df_pivot = df_ipp.pivot(index='Time', columns='Display_Name', values='MW').fillna(0.0)
+                    df_pivot = df_pivot.sort_index()
 
-            if not df_ipp.empty:
-                df_ipp['Display_Name'] = df_ipp['parameter_name'].str.replace(zone_prefix, '')
-                df_pivot = df_ipp.pivot(index='Time', columns='Display_Name', values='MW').fillna(0.0)
-                df_pivot = df_pivot.sort_index()
+                    valid_cols = [c for c in df_pivot.columns if df_pivot[c].abs().sum() > 0]
+                    df_pivot['CALCULATED_TOTAL'] = df_pivot[valid_cols].sum(axis=1)
 
-                valid_cols = [c for c in df_pivot.columns if df_pivot[c].abs().sum() > 0]
-                df_pivot['CALCULATED_TOTAL'] = df_pivot[valid_cols].sum(axis=1)
+                    fig_ipp = go.Figure()
+                    for i, col in enumerate(valid_cols):
+                        fig_ipp.add_trace(go.Scatter(
+                            x=df_pivot.index, y=df_pivot[col], name=col,
+                            stackgroup='ipp_stack', line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)]),
+                            hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
+                        ))
 
-                fig_ipp = go.Figure()
-                for col in valid_cols:
                     fig_ipp.add_trace(go.Scatter(
-                        x=df_pivot.index, y=df_pivot[col], name=col,
-                        stackgroup='ipp_stack', line=dict(width=0.5),
-                        hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
+                        x=df_pivot.index, y=df_pivot['CALCULATED_TOTAL'],
+                        name='CALCULATED TOTAL', line=dict(color='#1e1e1e', width=3),
+                        hovertemplate='<b>TOTAL IPP</b>: %{y:.2f} MW<extra></extra>'
                     ))
 
-                fig_ipp.add_trace(go.Scatter(
-                    x=df_pivot.index, y=df_pivot['CALCULATED_TOTAL'],
-                    name='CALCULATED TOTAL', line=dict(color='#1e1e1e', width=3),
-                    hovertemplate='<b>TOTAL IPP</b>: %{y:.2f} MW<extra></extra>'
-                ))
+                    fig_ipp = update_chart_layout(fig_ipp, "Dynamic Breakdown: Independent Power Producers (IPP)",
+                                                  legend_orientation="v")
+                    st.plotly_chart(fig_ipp, use_container_width=True)
 
-                fig_ipp = update_chart_layout(fig_ipp, "Dynamic Breakdown: Independent Power Producers (IPP)",
-                                              legend_orientation="v")
-                st.plotly_chart(fig_ipp, use_container_width=True)
+                    with st.expander("🔍 View Component Breakdown & Verification"):
+                        st.dataframe(df_pivot[valid_cols + ['CALCULATED_TOTAL']].style.format("{:.2f}"),
+                                     use_container_width=True)
+                else:
+                    st.info("No rows found in the IPP zone.")
 
-                with st.expander("🔍 View Component Breakdown & Verification"):
-                    st.dataframe(df_pivot[valid_cols + ['CALCULATED_TOTAL']].style.format("{:.2f}"),
-                                 use_container_width=True)
-            else:
-                st.info("No rows found in the IPP zone.")
+            # --- SUB-TAB: TOTAL ROR ---
+            with sub_tab_ror:
+                zone_prefix = 'ZONE_ROR_'
+                df_ror = df_all[df_all['parameter_name'].str.startswith(zone_prefix, na=False)].copy()
 
-        # --- SUB-TAB: TOTAL ROR ---
-        with sub_tab_ror:
-            zone_prefix = 'ZONE_ROR_'
-            df_ror = df_all[df_all['parameter_name'].str.startswith(zone_prefix, na=False)].copy()
+                if not df_ror.empty:
+                    df_ror['Display_Name'] = df_ror['parameter_name'].str.replace(zone_prefix, '')
+                    df_pivot = df_ror.pivot(index='Time', columns='Display_Name', values='MW').fillna(0.0)
+                    df_pivot = df_pivot.sort_index()
 
-            if not df_ror.empty:
-                df_ror['Display_Name'] = df_ror['parameter_name'].str.replace(zone_prefix, '')
-                df_pivot = df_ror.pivot(index='Time', columns='Display_Name', values='MW').fillna(0.0)
-                df_pivot = df_pivot.sort_index()
+                    valid_cols = [c for c in df_pivot.columns if df_pivot[c].abs().sum() > 0]
+                    df_pivot['CALCULATED_TOTAL'] = df_pivot[valid_cols].sum(axis=1)
 
-                valid_cols = [c for c in df_pivot.columns if df_pivot[c].abs().sum() > 0]
-                df_pivot['CALCULATED_TOTAL'] = df_pivot[valid_cols].sum(axis=1)
+                    fig_ror = go.Figure()
+                    for i, col in enumerate(valid_cols):
+                        fig_ror.add_trace(go.Scatter(
+                            x=df_pivot.index, y=df_pivot[col], name=col,
+                            stackgroup='ror_stack', line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)]),
+                            hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
+                        ))
 
-                fig_ror = go.Figure()
-                for col in valid_cols:
                     fig_ror.add_trace(go.Scatter(
-                        x=df_pivot.index, y=df_pivot[col], name=col,
-                        stackgroup='ror_stack', line=dict(width=0.5),
-                        hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
+                        x=df_pivot.index, y=df_pivot['CALCULATED_TOTAL'],
+                        name='CALCULATED TOTAL', line=dict(color='#1e1e1e', width=3),
+                        hovertemplate='<b>TOTAL ROR</b>: %{y:.2f} MW<extra></extra>'
                     ))
 
-                fig_ror.add_trace(go.Scatter(
-                    x=df_pivot.index, y=df_pivot['CALCULATED_TOTAL'],
-                    name='CALCULATED TOTAL', line=dict(color='#1e1e1e', width=3),
-                    hovertemplate='<b>TOTAL ROR</b>: %{y:.2f} MW<extra></extra>'
-                ))
+                    fig_ror = update_chart_layout(fig_ror, "Dynamic Breakdown: Run of River (ROR) Plants",
+                                                  legend_orientation="v")
+                    st.plotly_chart(fig_ror, use_container_width=True)
 
-                fig_ror = update_chart_layout(fig_ror, "Dynamic Breakdown: Run of River (ROR) Plants",
-                                              legend_orientation="v")
-                st.plotly_chart(fig_ror, use_container_width=True)
+                    with st.expander("🔍 View Component Breakdown & Verification"):
+                        st.dataframe(df_pivot[valid_cols + ['CALCULATED_TOTAL']].style.format("{:.2f}"),
+                                     use_container_width=True)
+                else:
+                    st.info("No rows found in the ROR zone.")
 
-                with st.expander("🔍 View Component Breakdown & Verification"):
-                    st.dataframe(df_pivot[valid_cols + ['CALCULATED_TOTAL']].style.format("{:.2f}"),
-                                 use_container_width=True)
-            else:
-                st.info("No rows found in the ROR zone.")
+            # --- SUB-TAB: TOTAL STORAGE ---
+            with sub_tab_storage:
+                zone_prefix = 'ZONE_STORAGE_'
+                df_storage = df_all[df_all['parameter_name'].str.startswith(zone_prefix, na=False)].copy()
 
-        # --- SUB-TAB: TOTAL STORAGE ---
-        with sub_tab_storage:
-            zone_prefix = 'ZONE_STORAGE_'
-            df_storage = df_all[df_all['parameter_name'].str.startswith(zone_prefix, na=False)].copy()
+                if not df_storage.empty:
+                    df_storage['Display_Name'] = df_storage['parameter_name'].str.replace(zone_prefix, '')
+                    df_pivot = df_storage.pivot(index='Time', columns='Display_Name', values='MW').fillna(0.0)
+                    df_pivot = df_pivot.sort_index()
 
-            if not df_storage.empty:
-                df_storage['Display_Name'] = df_storage['parameter_name'].str.replace(zone_prefix, '')
-                df_pivot = df_storage.pivot(index='Time', columns='Display_Name', values='MW').fillna(0.0)
-                df_pivot = df_pivot.sort_index()
+                    valid_cols = list(df_pivot.columns)
+                    df_pivot['CALCULATED_TOTAL'] = df_pivot[valid_cols].sum(axis=1)
 
-                valid_cols = list(df_pivot.columns)
-                df_pivot['CALCULATED_TOTAL'] = df_pivot[valid_cols].sum(axis=1)
+                    fig_storage = go.Figure()
+                    for i, col in enumerate(valid_cols):
+                        fig_storage.add_trace(go.Scatter(
+                            x=df_pivot.index, y=df_pivot[col], name=col,
+                            stackgroup='storage_stack', line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)]),
+                            hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
+                        ))
 
-                fig_storage = go.Figure()
-                for col in valid_cols:
                     fig_storage.add_trace(go.Scatter(
-                        x=df_pivot.index, y=df_pivot[col], name=col,
-                        stackgroup='storage_stack', line=dict(width=0.5),
-                        hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
+                        x=df_pivot.index, y=df_pivot['CALCULATED_TOTAL'],
+                        name='CALCULATED TOTAL', line=dict(color='#1e1e1e', width=3),
+                        hovertemplate='<b>TOTAL STORAGE</b>: %{y:.2f} MW<extra></extra>'
                     ))
 
-                fig_storage.add_trace(go.Scatter(
-                    x=df_pivot.index, y=df_pivot['CALCULATED_TOTAL'],
-                    name='CALCULATED TOTAL', line=dict(color='#1e1e1e', width=3),
-                    hovertemplate='<b>TOTAL STORAGE</b>: %{y:.2f} MW<extra></extra>'
-                ))
+                    fig_storage = update_chart_layout(fig_storage, "Storage Plants", legend_orientation="v")
+                    st.plotly_chart(fig_storage, use_container_width=True)
 
-                fig_storage = update_chart_layout(fig_storage, "Storage Plants", legend_orientation="v")
-                st.plotly_chart(fig_storage, use_container_width=True)
-
-                with st.expander("🔍 View Component Breakdown & Verification"):
-                    st.dataframe(df_pivot[valid_cols + ['CALCULATED_TOTAL']].style.format("{:.2f}"),
-                                 use_container_width=True)
-            else:
-                st.info("No rows found in the Storage zone.")
-
-    else:
-        st.info("No data found for the selected date.")
+                    with st.expander("🔍 View Component Breakdown & Verification"):
+                        st.dataframe(df_pivot[valid_cols + ['CALCULATED_TOTAL']].style.format("{:.2f}"),
+                                     use_container_width=True)
+                else:
+                    st.info("No rows found in the Storage zone.")
 
 with tab2:
     st.subheader(f"📊 Daily Peak Loads for Month {selected_month}, {selected_year}")
 
+    # DB Filter: Added nepali_day > 0
     query_monthly = '''
         SELECT nepali_day, time_interval, parameter_name, value
         FROM system_log_data
-        WHERE nepali_year = ? AND nepali_month = ?
+        WHERE nepali_year = ? AND nepali_month = ? AND nepali_day > 0
           AND parameter_name IN ('TOTAL SYSTEM LOAD (ACTUAL)', 'SUMMARY_TOTAL_EXPORT')
     '''
     df_raw = run_query(query_monthly, (selected_year, selected_month))
@@ -901,10 +955,11 @@ with tab2:
 with tab3:
     st.subheader("📈 Historical Trend: Maximum Load per Month")
 
+    # DB Filter: Added nepali_day > 0
     query_historical = '''
         SELECT nepali_year, nepali_month, nepali_day, time_interval, parameter_name, value
         FROM system_log_data
-        WHERE parameter_name IN ('TOTAL SYSTEM LOAD (ACTUAL)', 'SUMMARY_TOTAL_EXPORT')
+        WHERE parameter_name IN ('TOTAL SYSTEM LOAD (ACTUAL)', 'SUMMARY_TOTAL_EXPORT') AND nepali_day > 0
     '''
     df_raw = run_query(query_historical)
 
@@ -1121,10 +1176,11 @@ with tab4:
             for i, ym_str in enumerate(selected_comp_months):
                 y, m = map(int, ym_str.split('/'))
 
+                # DB Filter: Added nepali_day > 0
                 df_month = run_query('''
                     SELECT nepali_day, time_interval, value 
                     FROM system_log_data 
-                    WHERE parameter_name = ? AND nepali_year = ? AND nepali_month = ?
+                    WHERE parameter_name = ? AND nepali_year = ? AND nepali_month = ? AND nepali_day > 0
                 ''', (comp_param, y, m))
 
                 if not df_month.empty:
@@ -1197,10 +1253,11 @@ with tab4:
             for i, ym_str in enumerate(selected_comp_months):
                 y, m = map(int, ym_str.split('/'))
 
+                # DB Filter: Added nepali_day > 0
                 q_peak = '''
                     SELECT nepali_day, time_interval, value 
                     FROM system_log_data 
-                    WHERE parameter_name = ? AND nepali_year = ? AND nepali_month = ?
+                    WHERE parameter_name = ? AND nepali_year = ? AND nepali_month = ? AND nepali_day > 0
                     ORDER BY value DESC LIMIT 1
                 '''
                 df_peak = run_query(q_peak, (comp_param, y, m))
