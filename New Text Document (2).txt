@@ -1,0 +1,17 @@
+Set shell = CreateObject("WScript.Shell")
+' CHANGE THE PATH BELOW to your actual GitHub folder path
+folderPath = "C:\Users\CRLDC\Documents\GitHub\LDC_DATA-ANALYZER\LDC_Data"
+
+Do
+    ' Move into the directory and run Git commands
+    ' chr(34) is used to handle spaces in file paths
+    shell.CurrentDirectory = folderPath
+    
+    ' This runs the commands invisibly (0) and waits for them to finish (True)
+    shell.Run "git add .", 0, True
+    shell.Run "git commit -m " & chr(34) & "Auto-sync: " & Now & chr(34), 0, True
+    shell.Run "git push origin main", 0, True
+    
+    ' Wait for 5 minutes (300,000 milliseconds)
+    WScript.Sleep 300000 
+Loop
