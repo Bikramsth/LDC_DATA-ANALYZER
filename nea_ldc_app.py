@@ -253,13 +253,18 @@ def process_file(file_path):
                 "INSERT INTO processed_files (filename, mtime) VALUES (?, ?) ON CONFLICT(filename) DO UPDATE SET mtime=excluded.mtime",
                 (file_path, mtime))
             conn.commit()
-            st.cache_data.clear()
+            conn.close()
+            # 🚀 FIX: Safely clear cache so the UI registers new files instantly without crashing background thread
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
             return "SUCCESS", f"✅ Added `{filename}`."
+        
+        conn.close()
         return "ERROR", "No valid day sheets found."
     except Exception as e:
         return "ERROR", str(e)
-    finally:
-        conn.close()
 
 
 # ==========================================
@@ -268,12 +273,19 @@ def process_file(file_path):
 class FileWatcher(FileSystemEventHandler):
     def on_modified(self, event):
         if not event.is_directory and event.src_path.lower().endswith(('.xlsx', '.xls', '.csv')):
-            time.sleep(1)
+            time.sleep(2)
             process_file(event.src_path)
 
     def on_created(self, event):
-        if not event.is_directory and event.src_path.lower().endswith(('.xlsx', '.xls', '.csv')):
-            time.sleep(1)
+        # 🚀 FIX: If user drags-and-drops an entire FOLDER, this scans inside it immediately
+        if event.is_directory:
+            time.sleep(2)
+            for root, dirs, files in os.walk(event.src_path):
+                for f in files:
+                    if f.lower().endswith(('.xlsx', '.xls', '.csv')) and not f.startswith('~'):
+                        process_file(os.path.join(root, f))
+        elif event.src_path.lower().endswith(('.xlsx', '.xls', '.csv')):
+            time.sleep(2)
             process_file(event.src_path)
 
 
@@ -409,6 +421,7 @@ if years_df.empty:
                         process_file(os.path.join(root, f))
             status_box.update(label="Scan Complete!", state="complete", expanded=False)
         time.sleep(2)
+        st.cache_data.clear() # Fix UI cache
         st.rerun()
     st.stop()
 
@@ -422,6 +435,7 @@ with st.sidebar:
                 for f in files:
                     if f.endswith(('.xlsx', '.xls', '.csv')) and not f.startswith('~'):
                         process_file(os.path.join(root, f))
+        st.cache_data.clear() # 🚀 FIX: Dropdowns now immediately update when clicking rescan
         st.rerun()
 
     st.header("📅 Primary Date Filter")
@@ -516,7 +530,7 @@ with t1:
                 if not raw_supply_components:
                     raw_supply_components = [
                         p for p in all_db_params if (
-                                                                'TOTAL' in p.upper() or 'INTERRUPTION' in p.upper() or 'ROR' in p.upper() or 'STORGE' in p.upper() or 'STORAGE' in p.upper())
+                                                        'TOTAL' in p.upper() or 'INTERRUPTION' in p.upper() or 'ROR' in p.upper() or 'STORGE' in p.upper() or 'STORAGE' in p.upper())
                                                     and 'IMPORT' not in p.upper() and 'EXPORT' not in p.upper() and 'LOAD' not in p.upper() and 'OTHER IPP' not in p.upper() and 'ZONE_' not in p.upper()
                     ]
 
