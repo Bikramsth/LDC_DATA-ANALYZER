@@ -57,7 +57,7 @@ def init_db():
             cursor.execute(
                 'CREATE INDEX IF NOT EXISTS idx_sys_date_param ON system_log_data(nepali_year, nepali_month, nepali_day, parameter_name);')
 
-            # 🚀 AUTO-CLEANER: Fixes old duplicated data
+            # 🚀 AUTO-CLEANER: Fixes old duplicated data and catches lost "Interruption/Tripping" rows!
             updates = {
                 "Total IPP": "SUMMARY_TOTAL_IPP",
                 "TOTAL IPP": "SUMMARY_TOTAL_IPP",
@@ -71,7 +71,16 @@ def init_db():
                 "Total IMPORT": "SUMMARY_TOTAL_IMPORT",
                 "TOTAL IMPORT": "SUMMARY_TOTAL_IMPORT",
                 "Total EXPORT": "SUMMARY_TOTAL_EXPORT",
-                "TOTAL EXPORT": "SUMMARY_TOTAL_EXPORT"
+                "TOTAL EXPORT": "SUMMARY_TOTAL_EXPORT",
+                "Total Interruption": "SUMMARY_TOTAL_INTERRUPTION",
+                "TOTAL INTERRUPTION": "SUMMARY_TOTAL_INTERRUPTION",
+                "INTERRUPTION": "SUMMARY_TOTAL_INTERRUPTION",
+                "Interruption": "SUMMARY_TOTAL_INTERRUPTION",
+                "Interruption/Tripping": "SUMMARY_TOTAL_INTERRUPTION",
+                "INTERRUPTION/TRIPPING": "SUMMARY_TOTAL_INTERRUPTION",
+                "Interruption / Tripping": "SUMMARY_TOTAL_INTERRUPTION",
+                "ZONE_EXPORT_Interruption/Tripping": "SUMMARY_TOTAL_INTERRUPTION",
+                "ZONE_EXPORT_INTERRUPTION/TRIPPING": "SUMMARY_TOTAL_INTERRUPTION"
             }
             for old_name, new_name in updates.items():
                 cursor.execute("UPDATE OR IGNORE system_log_data SET parameter_name = ? WHERE parameter_name = ?",
@@ -174,6 +183,8 @@ def extract_data(df, year, month, day, cursor):
             db_param_name, current_block = "SUMMARY_TOTAL_EXPORT", "FINAL_TOTALS"
         elif "SYSTEM LOAD" in upper_name:
             db_param_name, current_block = "TOTAL SYSTEM LOAD (ACTUAL)", "FINAL_TOTALS"
+        elif "INTERRUPT" in upper_name or "TRIP" in upper_name: # 🚀 FIX: Broadened catch for Interruption/Tripping
+            db_param_name, current_block = "SUMMARY_TOTAL_INTERRUPTION", "FINAL_TOTALS"
         else:
             prefixes = {"IPP_ZONE": "ZONE_IPP_", "NEA_SUB_ZONE": "ZONE_NEASUB_", "ROR_ZONE": "ZONE_ROR_",
                         "STORAGE_ZONE": "ZONE_STORAGE_", "IMPORT_ZONE": "ZONE_IMPORT_", "EXPORT_ZONE": "ZONE_EXPORT_"}
@@ -253,18 +264,13 @@ def process_file(file_path):
                 "INSERT INTO processed_files (filename, mtime) VALUES (?, ?) ON CONFLICT(filename) DO UPDATE SET mtime=excluded.mtime",
                 (file_path, mtime))
             conn.commit()
-            conn.close()
-            # 🚀 FIX: Safely clear cache so the UI registers new files instantly without crashing background thread
-            try:
-                st.cache_data.clear()
-            except Exception:
-                pass
+            st.cache_data.clear()
             return "SUCCESS", f"✅ Added `{filename}`."
-        
-        conn.close()
         return "ERROR", "No valid day sheets found."
     except Exception as e:
         return "ERROR", str(e)
+    finally:
+        conn.close()
 
 
 # ==========================================
@@ -273,19 +279,12 @@ def process_file(file_path):
 class FileWatcher(FileSystemEventHandler):
     def on_modified(self, event):
         if not event.is_directory and event.src_path.lower().endswith(('.xlsx', '.xls', '.csv')):
-            time.sleep(2)
+            time.sleep(1)
             process_file(event.src_path)
 
     def on_created(self, event):
-        # 🚀 FIX: If user drags-and-drops an entire FOLDER, this scans inside it immediately
-        if event.is_directory:
-            time.sleep(2)
-            for root, dirs, files in os.walk(event.src_path):
-                for f in files:
-                    if f.lower().endswith(('.xlsx', '.xls', '.csv')) and not f.startswith('~'):
-                        process_file(os.path.join(root, f))
-        elif event.src_path.lower().endswith(('.xlsx', '.xls', '.csv')):
-            time.sleep(2)
+        if not event.is_directory and event.src_path.lower().endswith(('.xlsx', '.xls', '.csv')):
+            time.sleep(1)
             process_file(event.src_path)
 
 
@@ -324,7 +323,7 @@ def categorize_params(param_list):
             cat = "⬇️ Import"
         elif p_up.startswith('ZONE_EXPORT_'):
             cat = "⬆️ Export"
-        elif 'SUMMARY' in p_up or 'TOTAL' in p_up or 'LOAD' in p_up:
+        elif 'SUMMARY' in p_up or 'TOTAL' in p_up or 'LOAD' in p_up or 'INTERRUPTION' in p_up:
             cat = "📊 System Totals"
         else:
             cat = "📁 Other"
@@ -337,7 +336,7 @@ def clean_param_name(p):
                                                                'Total NEA Subsidiaries').replace('SUMMARY_TOTAL_ROR',
                                                                                                  'Total ROR').replace(
         'SUMMARY_TOTAL_STORAGE', 'Total Storage').replace('SUMMARY_TOTAL_IMPORT', 'Total IMPORT').replace(
-        'SUMMARY_TOTAL_EXPORT', 'Total EXPORT').replace('ZONE_IPP_', 'IPP: ').replace('ZONE_ROR_', 'ROR: ').replace(
+        'SUMMARY_TOTAL_EXPORT', 'Total EXPORT').replace('SUMMARY_TOTAL_INTERRUPTION', 'Interruption / Tripping').replace('ZONE_IPP_', 'IPP: ').replace('ZONE_ROR_', 'ROR: ').replace(
         'ZONE_STORAGE_', 'STORAGE: ').replace('ZONE_NEASUB_', 'SUB: ').replace('ZONE_IMPORT_', 'IMPORT: ').replace(
         'ZONE_EXPORT_', 'EXPORT: ')
 
@@ -348,8 +347,8 @@ def convert_df(df): return df.to_csv(index=False).encode('utf-8')
 
 # 🚀 LAYOUT UPGRADE: Legend is permanently forced to the right side ("v") for all charts
 def update_chart_layout(fig, title, yaxis_title="Power (MW)", xaxis_title="Time", legend_orientation="v"):
-    legend_settings = dict(orientation="v", y=1, x=1.02)
-    right_margin = 150
+    legend_settings = dict(orientation="v", y=1, x=1.02) if legend_orientation == "v" else dict(orientation="h", y=-0.25, x=0, yanchor="top")
+    right_margin = 150 if legend_orientation == "v" else 10
 
     fig.update_layout(
         title=title, hovermode="x unified", template="plotly_white",
@@ -393,7 +392,7 @@ st.markdown("""
         }
         div[data-testid="metric-container"]:hover { transform: translateY(-2px); box-shadow: 0 6px 12px rgba(0, 0, 0, 0.1); }
         div[data-testid="stMetricLabel"] { font-weight: 600; color: #5e6e82; }
-        div[data-testid="stMetricValue"] { color: #0f172a; font-weight: 700; font-size: 2rem !important; }
+        div[data-testid="stMetricValue"] { color: #0f172a; font-weight: 700; font-size: 1.8rem !important; }
         .stTabs [data-baseweb="tab-list"] { gap: 15px; }
         .stTabs [data-baseweb="tab"] { 
             height: 50px; background-color: #ffffff; border-radius: 8px 8px 0px 0px; 
@@ -421,7 +420,6 @@ if years_df.empty:
                         process_file(os.path.join(root, f))
             status_box.update(label="Scan Complete!", state="complete", expanded=False)
         time.sleep(2)
-        st.cache_data.clear() # Fix UI cache
         st.rerun()
     st.stop()
 
@@ -435,7 +433,6 @@ with st.sidebar:
                 for f in files:
                     if f.endswith(('.xlsx', '.xls', '.csv')) and not f.startswith('~'):
                         process_file(os.path.join(root, f))
-        st.cache_data.clear() # 🚀 FIX: Dropdowns now immediately update when clicking rescan
         st.rerun()
 
     st.header("📅 Primary Date Filter")
@@ -534,10 +531,11 @@ with t1:
                                                     and 'IMPORT' not in p.upper() and 'EXPORT' not in p.upper() and 'LOAD' not in p.upper() and 'OTHER IPP' not in p.upper() and 'ZONE_' not in p.upper()
                     ]
 
-                import_tag, export_tag = 'SUMMARY_TOTAL_IMPORT', 'SUMMARY_TOTAL_EXPORT'
+                import_tag, export_tag, int_tag = 'SUMMARY_TOTAL_IMPORT', 'SUMMARY_TOTAL_EXPORT', 'SUMMARY_TOTAL_INTERRUPTION'
                 req_p = raw_supply_components.copy()
                 if import_tag in all_db_params: req_p.append(import_tag)
                 if export_tag in all_db_params: req_p.append(export_tag)
+                if int_tag in all_db_params: req_p.append(int_tag)
 
                 df_piv = df_all[df_all['parameter_name'].isin(req_p)].pivot(index='Time', columns='parameter_name',
                                                                             values='MW').fillna(0.0).sort_index()
@@ -548,24 +546,32 @@ with t1:
 
                 if export_tag not in df_piv.columns: df_piv[export_tag] = 0.0
                 if import_tag not in df_piv.columns: df_piv[import_tag] = 0.0
+                if int_tag not in df_piv.columns: df_piv[int_tag] = 0.0
 
                 df_piv[import_tag] -= df_piv[export_tag].abs()
-                df_piv['DYNAMIC_NATIONAL_LOAD'] = df_piv[val_comps].sum(axis=1)
-                df_piv['DYNAMIC_SYSTEM_LOAD'] = df_piv['DYNAMIC_NATIONAL_LOAD'] + df_piv[export_tag].abs()
+                
+                # 🚀 MATHEMATICAL CORRECTION BASED ON USER PROMPT
+                df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = df_piv[val_comps].sum(axis=1)
+                df_piv['TOTAL SYSTEM LOAD (EXPECTED)'] = df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] + df_piv[int_tag]
+                df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = df_piv['TOTAL SYSTEM LOAD (EXPECTED)'] + df_piv[export_tag].abs()
 
-                sys_peak_hour, sys_peak_val = df_piv['DYNAMIC_SYSTEM_LOAD'].idxmax(), df_piv[
-                    'DYNAMIC_SYSTEM_LOAD'].max()
-                nat_peak_hour, nat_peak_val = df_piv['DYNAMIC_NATIONAL_LOAD'].idxmax(), df_piv[
-                    'DYNAMIC_NATIONAL_LOAD'].max()
-                total_energy_mwh, load_factor = df_piv['DYNAMIC_SYSTEM_LOAD'].sum(), (
-                            df_piv['DYNAMIC_SYSTEM_LOAD'].mean() / sys_peak_val * 100) if sys_peak_val > 0 else 0
+                sys_act_peak_hour = df_piv['TOTAL SYSTEM LOAD (ACTUAL)'].idxmax()
+                sys_act_peak_val = df_piv['TOTAL SYSTEM LOAD (ACTUAL)'].max()
+                sys_exp_peak_hour = df_piv['TOTAL SYSTEM LOAD (EXPECTED)'].idxmax()
+                sys_exp_peak_val = df_piv['TOTAL SYSTEM LOAD (EXPECTED)'].max()
+                nat_act_peak_hour = df_piv['TOTAL NATIONAL LOAD (ACTUAL)'].idxmax()
+                nat_act_peak_val = df_piv['TOTAL NATIONAL LOAD (ACTUAL)'].max()
+
+                total_energy_mwh = df_piv['TOTAL SYSTEM LOAD (ACTUAL)'].sum()
+                load_factor = (df_piv['TOTAL SYSTEM LOAD (ACTUAL)'].mean() / sys_act_peak_val * 100) if sys_act_peak_val > 0 else 0
 
                 st.markdown("<br>", unsafe_allow_html=True)
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric(f"📈 Max Sys Load ({sys_peak_hour})", f"{sys_peak_val:.2f} MW")
-                m2.metric(f"📊 Max Nat Peak ({nat_peak_hour})", f"{nat_peak_val:.2f} MW")
-                m3.metric(f"⚡ Total Energy", f"{total_energy_mwh:,.0f} MWh")
-                m4.metric(f"⚙️ Load Factor", f"{load_factor:.1f}%")
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric(f"📈 Sys Load Actual ({sys_act_peak_hour})", f"{sys_act_peak_val:.2f} MW")
+                m2.metric(f"⚠️ Sys Load Expected ({sys_exp_peak_hour})", f"{sys_exp_peak_val:.2f} MW")
+                m3.metric(f"📊 Nat Load Actual ({nat_act_peak_hour})", f"{nat_act_peak_val:.2f} MW")
+                m4.metric(f"⚡ Total Energy", f"{total_energy_mwh:,.0f} MWh")
+                m5.metric(f"⚙️ Load Factor", f"{load_factor:.1f}%")
                 st.markdown("<br>", unsafe_allow_html=True)
 
                 fig_main = go.Figure()
@@ -584,17 +590,24 @@ with t1:
                     fig_main.add_trace(go.Scatter(x=df_piv.index, y=-df_piv[export_tag].abs(), name='Total EXPORT',
                                                   stackgroup='export_stack', line=dict(width=0.5, color='#d62728')))
 
-                fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv['DYNAMIC_SYSTEM_LOAD'], name='SYSTEM LOAD',
+                fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv['TOTAL SYSTEM LOAD (ACTUAL)'], name='TOTAL SYSTEM LOAD (ACTUAL)',
                                               line=dict(color='#ff3366', width=2.5, dash='dot')))
-                fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv['DYNAMIC_NATIONAL_LOAD'], name='NATIONAL LOAD',
+                fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv['TOTAL SYSTEM LOAD (EXPECTED)'], name='TOTAL SYSTEM LOAD (EXPECTED)',
+                                              line=dict(color='#8c564b', width=2.5, dash='dashdot')))
+                fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv['TOTAL NATIONAL LOAD (ACTUAL)'], name='TOTAL NATIONAL LOAD (ACTUAL)',
                                               line=dict(color='#1e1e1e', width=3)))
+
+                # 🚀 PLOT INTERRUPTION
+                if df_piv[int_tag].sum() > 0:
+                    fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv[int_tag], name='Interruption / Tripping',
+                                                  line=dict(color='#ff7f0e', width=2)))
 
                 fig_main = update_chart_layout(fig_main, "System Operation & Load Curve", legend_orientation="v")
                 fig_main.add_hline(y=0, line_width=2, line_color="#1e1e1e")
                 st.plotly_chart(fig_main, use_container_width=True)
 
                 with st.expander("🔍 View Filtered Supply Components & Loads"):
-                    display_cols = ['DYNAMIC_SYSTEM_LOAD', 'DYNAMIC_NATIONAL_LOAD'] + val_comps + [export_tag]
+                    display_cols = ['TOTAL SYSTEM LOAD (ACTUAL)', 'TOTAL SYSTEM LOAD (EXPECTED)', 'TOTAL NATIONAL LOAD (ACTUAL)'] + val_comps + [export_tag, int_tag]
                     st.dataframe(df_piv[display_cols].style.format("{:.2f}"), use_container_width=True)
 
 
