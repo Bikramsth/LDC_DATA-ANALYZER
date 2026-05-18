@@ -19,7 +19,9 @@ FOLDER_TO_WATCH = "./LDC_Data"
 DATABASE_NAME = "NEA_LDC_Database.db"
 
 # Custom NEA Color Palette for Visual Clarity
-NEA_PALETTE = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+NEA_PALETTE = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22',
+               '#17becf']
+
 
 @st.cache_resource
 def init_db():
@@ -55,7 +57,7 @@ def init_db():
             cursor.execute(
                 'CREATE INDEX IF NOT EXISTS idx_sys_date_param ON system_log_data(nepali_year, nepali_month, nepali_day, parameter_name);')
 
-            # 🚀 AUTO-CLEANER: Fixes old duplicated data and standardizes Interruption
+            # 🚀 AUTO-CLEANER: Fixes old duplicated data
             updates = {
                 "Total IPP": "SUMMARY_TOTAL_IPP",
                 "TOTAL IPP": "SUMMARY_TOTAL_IPP",
@@ -84,9 +86,9 @@ def init_db():
                 cursor.execute("UPDATE OR IGNORE system_log_data SET parameter_name = ? WHERE parameter_name = ?",
                                (new_name, old_name))
                 cursor.execute("DELETE FROM system_log_data WHERE parameter_name = ?", (old_name,))
-                
-            # 🚀 FIX: Convert all historical negative Export values to positive magnitudes!
-            cursor.execute("UPDATE system_log_data SET value = ABS(value)")
+
+            # 🚀 FIX: Forces all Export lines to be strictly negative in the database to align with the negative axis
+            cursor.execute("UPDATE system_log_data SET value = -ABS(value) WHERE parameter_name LIKE 'ZONE_EXPORT_%' OR parameter_name = 'SUMMARY_TOTAL_EXPORT'")
 
             conn.commit()
             conn.close()
@@ -105,6 +107,7 @@ def run_query(query, params=()):
     df = pd.read_sql_query(query, conn, params=params)
     conn.close()
     return df
+
 
 # ==========================================
 # 2. DATA EXTRACTION ENGINE
@@ -185,6 +188,8 @@ def extract_data(df, year, month, day, cursor):
             db_param_name, current_block = "TOTAL SYSTEM LOAD (ACTUAL)", "FINAL_TOTALS"
         elif "INTERRUPT" in upper_name or "TRIP" in upper_name: 
             db_param_name, current_block = "SUMMARY_TOTAL_INTERRUPTION", "FINAL_TOTALS"
+        elif "KATIYA" in upper_name or "KATAIYA" in upper_name: # 🚀 FIX: Catch Katiya explicitly to ensure it combines into Export
+            db_param_name, current_block = f"ZONE_EXPORT_{raw_name}", "EXPORT_ZONE"
         else:
             prefixes = {"IPP_ZONE": "ZONE_IPP_", "NEA_SUB_ZONE": "ZONE_NEASUB_", "ROR_ZONE": "ZONE_ROR_",
                         "STORAGE_ZONE": "ZONE_STORAGE_", "IMPORT_ZONE": "ZONE_IMPORT_", "EXPORT_ZONE": "ZONE_EXPORT_"}
@@ -197,8 +202,10 @@ def extract_data(df, year, month, day, cursor):
                 if clean_val in ['', '-']:
                     final_value = 0.0
                 else:
-                    # 🚀 FIX: EVERYTHING is now stored strictly as a positive magnitude!
-                    final_value = abs(float(clean_val)) 
+                    final_value = float(clean_val)
+                    # 🚀 FIX: If it is an Export line, force it to be negative so it plots downward no matter what!
+                    if current_block == "EXPORT_ZONE" or db_param_name == "SUMMARY_TOTAL_EXPORT":
+                        final_value = -abs(final_value)
             except:
                 final_value = 0.0
 
@@ -353,6 +360,7 @@ def clean_param_name(p):
 @st.cache_data(show_spinner=False)
 def convert_df(df): return df.to_csv(index=False).encode('utf-8')
 
+
 def update_chart_layout(fig, title, yaxis_title="Power (MW)", xaxis_title="Time", legend_orientation="v"):
     legend_settings = dict(orientation="v", y=1, x=1.02) if legend_orientation == "v" else dict(orientation="h", y=-0.25, x=0, yanchor="top")
     right_margin = 150 if legend_orientation == "v" else 10
@@ -368,11 +376,14 @@ def update_chart_layout(fig, title, yaxis_title="Power (MW)", xaxis_title="Time"
     return fig
 
 
-def draw_stacked_chart(df_pivot, cols, title, total_col=None):
+def draw_stacked_chart(df_pivot, cols, title, total_col=None, show_export=False, export_col=None):
     fig = go.Figure()
     for i, col in enumerate(cols):
         fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[col], name=clean_param_name(col), stackgroup='one',
                                  line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)])))
+    if show_export and export_col and export_col in df_pivot.columns:
+        fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[export_col], name='Total EXPORT', stackgroup='two', # Uses raw negative value directly
+                                 line=dict(width=0.5, color='#d62728')))
     if total_col and total_col in df_pivot.columns:
         fig.add_trace(
             go.Scatter(x=df_pivot.index, y=df_pivot[total_col], name='TOTAL', line=dict(color='#1e1e1e', width=3)))
@@ -513,7 +524,6 @@ t1, t2, t3, t4 = st.tabs([
 ])
 
 with t1:
-    # 🚀 EXPLICIT TABS: Added "Total EXPORT" physically to the UI
     st1, st2, st3, st4, st5, st6, st7 = st.tabs([
         "Main System", "Total IMPORT", "Total EXPORT", "Total NEA SUBSIDIARIES", "Total IPP", "Total ROR", "Total STORAGE"
     ])
@@ -539,10 +549,11 @@ with t1:
                     ]
 
                 import_tag, export_tag, int_tag = 'SUMMARY_TOTAL_IMPORT', 'SUMMARY_TOTAL_EXPORT', 'SUMMARY_TOTAL_INTERRUPTION'
+                katiya_cols = [p for p in all_db_params if 'KATIYA' in p.upper() or 'KATAIYA' in p.upper()]
+
                 req_p = raw_supply_components.copy()
-                if import_tag in all_db_params: req_p.append(import_tag)
-                if export_tag in all_db_params: req_p.append(export_tag)
-                if int_tag in all_db_params: req_p.append(int_tag)
+                for tag in [import_tag, export_tag, int_tag] + katiya_cols:
+                    if tag in all_db_params and tag not in req_p: req_p.append(tag)
 
                 df_piv = df_all[df_all['parameter_name'].isin(req_p)].pivot(index='Time', columns='parameter_name',
                                                                             values='MW').fillna(0.0).sort_index()
@@ -554,6 +565,13 @@ with t1:
                 if export_tag not in df_piv.columns: df_piv[export_tag] = 0.0
                 if import_tag not in df_piv.columns: df_piv[import_tag] = 0.0
                 if int_tag not in df_piv.columns: df_piv[int_tag] = 0.0
+                
+                # 🚀 FIX: Combine Katiya into Export and prevent it from rendering separately
+                for kc in katiya_cols:
+                    if kc in df_piv.columns:
+                        df_piv[export_tag] += df_piv[kc]  # Both are negative, so this adds their magnitudes mathematically
+                    if kc in val_comps:
+                        val_comps.remove(kc)
 
                 df_piv[import_tag] -= df_piv[export_tag].abs()
 
@@ -592,17 +610,11 @@ with t1:
                         hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'
                     ))
 
-                # 🚀 FIX: Plot export downwards, but explicitly use `customdata` to show the POSITIVE magnitude on hover!
-                if df_piv[export_tag].sum() > 0:
-                    fig_main.add_trace(go.Scatter(
-                        x=df_piv.index, 
-                        y=-df_piv[export_tag], 
-                        name='Total EXPORT',
-                        stackgroup='export_stack', 
-                        line=dict(width=0.5, color='#d62728'),
-                        customdata=df_piv[export_tag],
-                        hovertemplate='<b>%{fullData.name}</b>: %{customdata:.2f} MW<extra></extra>'
-                    ))
+                # 🚀 FIX: Plot export negative value directly to match negative y-axis
+                if df_piv[export_tag].abs().sum() > 0:
+                    fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv[export_tag], name='Total EXPORT',
+                                                  stackgroup='export_stack', line=dict(width=0.5, color='#d62728'),
+                                                  hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'))
 
                 fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv['TOTAL SYSTEM LOAD (ACTUAL)'], name='TOTAL SYSTEM LOAD (ACTUAL)',
                                               line=dict(color='#ff3366', width=2.5, dash='dot')))
@@ -624,15 +636,15 @@ with t1:
                     st.dataframe(df_piv[display_cols].style.format("{:.2f}"), use_container_width=True)
 
 
-            def render_sub(prefix, title):
+            def render_sub(prefix, title, is_import=False):
                 df_sub = df_all[df_all['parameter_name'].str.startswith(prefix)].copy()
                 if not df_sub.empty:
                     df_sub['parameter_name'] = df_sub['parameter_name'].str.replace(prefix, '')
                     df_p = df_sub.pivot(index='Time', columns='parameter_name', values='MW').sort_index().interpolate(
                         method='linear').fillna(0.0)
-                    v_cols = [c for c in df_p.columns if df_p[c].abs().sum() > 0]
+                    v_cols = list(df_p.columns) if is_import else [c for c in df_p.columns if df_p[c].abs().sum() > 0]
                     df_p['TOTAL'] = df_p[v_cols].sum(axis=1)
-                    draw_stacked_chart(df_p, v_cols, title, 'TOTAL')
+                    draw_stacked_chart(df_p, v_cols, title, 'TOTAL', show_export=is_import)
                     with st.expander(f"🔍 View & Export {title} Data"):
                         st.dataframe(df_p[v_cols + ['TOTAL']].style.format("{:.2f}"), use_container_width=True)
                         st.download_button("📥 Download CSV", data=convert_df(df_p[v_cols + ['TOTAL']].reset_index()),
@@ -643,9 +655,9 @@ with t1:
 
 
             with st2:
-                render_sub('ZONE_IMPORT_', 'Dynamic Breakdown: Import')
+                render_sub('ZONE_IMPORT_', 'Dynamic Breakdown: Import', True)
             with st3:
-                render_sub('ZONE_EXPORT_', 'Dynamic Breakdown: Export') # 🚀 Explicit Export Tab mapped correctly
+                render_sub('ZONE_EXPORT_', 'Dynamic Breakdown: Export')
             with st4:
                 render_sub('ZONE_NEASUB_', 'Dynamic Breakdown: NEA Subsidiaries')
             with st5:
@@ -666,9 +678,7 @@ with t2:
         if 'TOTAL SYSTEM LOAD (ACTUAL)' not in df_piv.columns: df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = 0.0
         if 'SUMMARY_TOTAL_EXPORT' not in df_piv.columns: df_piv['SUMMARY_TOTAL_EXPORT'] = 0.0
         df_piv['Sys Peak'] = df_piv['TOTAL SYSTEM LOAD (ACTUAL)']
-        
-        # SUMMARY_TOTAL_EXPORT is now purely positive, so we just add it to system load!
-        df_piv['Nat Peak'] = df_piv['Sys Peak'] + df_piv['SUMMARY_TOTAL_EXPORT']
+        df_piv['Nat Peak'] = df_piv['Sys Peak'] + df_piv['SUMMARY_TOTAL_EXPORT'].abs()
 
         sys_d = df_piv.loc[
             df_piv.groupby('nepali_day')['Sys Peak'].idxmax(), ['nepali_day', 'time_interval', 'Sys Peak']].rename(
@@ -698,9 +708,7 @@ with t3:
         if 'TOTAL SYSTEM LOAD (ACTUAL)' not in df_piv.columns: df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = 0.0
         if 'SUMMARY_TOTAL_EXPORT' not in df_piv.columns: df_piv['SUMMARY_TOTAL_EXPORT'] = 0.0
         df_piv['Sys'] = df_piv['TOTAL SYSTEM LOAD (ACTUAL)']
-        
-        # SUMMARY_TOTAL_EXPORT is now positive
-        df_piv['Nat'] = df_piv['Sys'] + df_piv['SUMMARY_TOTAL_EXPORT']
+        df_piv['Nat'] = df_piv['Sys'] + df_piv['SUMMARY_TOTAL_EXPORT'].abs()
 
         s_d = df_piv.loc[
             df_piv.groupby(['nepali_year', 'nepali_month'])['Sys'].idxmax(), ['nepali_year', 'nepali_month',
