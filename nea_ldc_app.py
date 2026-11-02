@@ -27,9 +27,8 @@ ERROR_FOLDER = "./LDC_Data_Errors"
 BACKUP_FOLDER = "./LDC_Backups"
 DATABASE_NAME = "NEA_LDC_Database.db"
 
-NEA_PALETTE = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+NEA_PALETTE = ['#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
 
-# Thread-safe queue for processing files
 file_queue = queue.Queue()
 
 @st.cache_resource
@@ -118,10 +117,8 @@ def backup_database():
 def automated_backup_worker():
     while True:
         time.sleep(86400) 
-        try:
-            backup_database()
-        except Exception:
-            pass
+        try: backup_database()
+        except Exception: pass
 
 # ==========================================
 # 2. DATA EXTRACTION ENGINE
@@ -162,8 +159,7 @@ def extract_data(df, year, month, day, cursor):
                 try:
                     num = float(val)
                     if 0 < num <= 24: current_time_cols[col_idx] = f"{int(num):02d}:{int(round((num - int(num)) * 60)):02d}:00"
-                except:
-                    pass
+                except: pass
         if len(current_time_cols) >= 20:
             time_columns = current_time_cols
             header_row_index = idx
@@ -207,7 +203,6 @@ def extract_data(df, year, month, day, cursor):
                     final_value = float(clean_val)
             except:
                 final_value = 0.0
-
             daily_data[time_interval][db_param_name] = final_value
 
     bulk_insert_data = []
@@ -247,11 +242,8 @@ def extract_data(df, year, month, day, cursor):
 def process_file(file_path):
     time.sleep(1)
     filename = os.path.basename(file_path)
-    if not os.path.exists(ERROR_FOLDER):
-        os.makedirs(ERROR_FOLDER)
-
-    if not filename.lower().endswith(('.xlsx', '.xls', '.csv')) or filename.startswith('~'):
-        return
+    if not os.path.exists(ERROR_FOLDER): os.makedirs(ERROR_FOLDER)
+    if not filename.lower().endswith(('.xlsx', '.xls', '.csv')) or filename.startswith('~'): return
 
     year, month = parse_filename(filename)
     if not year or not month: return
@@ -268,11 +260,9 @@ def process_file(file_path):
         file_bytes = None
         for _ in range(3):
             try:
-                with open(file_path, 'rb') as f:
-                    file_bytes = f.read()
+                with open(file_path, 'rb') as f: file_bytes = f.read()
                 break
-            except PermissionError:
-                time.sleep(1)
+            except PermissionError: time.sleep(1)
 
         if not file_bytes: return
         file_io, rows_inserted = io.BytesIO(file_bytes), 0
@@ -305,16 +295,11 @@ def process_file(file_path):
             st.cache_data.clear()
 
     except ValueError as ve:
-        try:
-            shutil.move(file_path, os.path.join(ERROR_FOLDER, filename))
-        except Exception:
-            pass
-    except Exception as e:
-        pass
+        try: shutil.move(file_path, os.path.join(ERROR_FOLDER, filename))
+        except Exception: pass
+    except Exception: pass
     finally:
         if 'conn' in locals(): conn.close()
-        file_bytes = None
-        file_io = None
 
 # ==========================================
 # 3. BACKGROUND FOLDER MONITOR
@@ -325,28 +310,20 @@ def process_queue_worker():
         try:
             process_file(file_path)
             gc.collect()
-        except Exception:
-            pass
-        finally:
-            file_queue.task_done()
+        except Exception: pass
+        finally: file_queue.task_done()
 
 class FileWatcher(FileSystemEventHandler):
     def on_modified(self, event):
-        if not event.is_directory and event.src_path.lower().endswith(('.xlsx', '.xls', '.csv')):
-            file_queue.put(event.src_path)
-
+        if not event.is_directory and event.src_path.lower().endswith(('.xlsx', '.xls', '.csv')): file_queue.put(event.src_path)
     def on_created(self, event):
-        if not event.is_directory and event.src_path.lower().endswith(('.xlsx', '.xls', '.csv')):
-            file_queue.put(event.src_path)
+        if not event.is_directory and event.src_path.lower().endswith(('.xlsx', '.xls', '.csv')): file_queue.put(event.src_path)
 
 @st.cache_resource
 def start_background_monitor():
-    if not os.path.exists(FOLDER_TO_WATCH):
-        os.makedirs(FOLDER_TO_WATCH)
-        
+    if not os.path.exists(FOLDER_TO_WATCH): os.makedirs(FOLDER_TO_WATCH)
     threading.Thread(target=process_queue_worker, daemon=True).start()
     threading.Thread(target=automated_backup_worker, daemon=True).start()
-
     event_handler = FileWatcher()
     observer = Observer()
     observer.schedule(event_handler, FOLDER_TO_WATCH, recursive=True)
@@ -375,16 +352,7 @@ def categorize_params(param_list):
     return categories
 
 def clean_param_name(p):
-    return p.replace('SUMMARY_TOTAL_IPP', 'Total IPP').replace(
-        'SUMMARY_TOTAL_NEA_SUBS', 'Total NEA Subsidiaries').replace(
-        'SUMMARY_TOTAL_ROR', 'Total ROR').replace(
-        'SUMMARY_TOTAL_STORAGE', 'Total Storage').replace(
-        'SUMMARY_TOTAL_IMPORT', 'Total IMPORT').replace(
-        'SUMMARY_TOTAL_EXPORT', 'Total EXPORT').replace(
-        'COMBINED_INTERRUPTION', 'Interruption / Tripping').replace(
-        'ZONE_IPP_', 'IPP: ').replace('ZONE_ROR_', 'ROR: ').replace(
-        'ZONE_STORAGE_', 'STORAGE: ').replace('ZONE_NEASUB_', 'SUB: ').replace(
-        'ZONE_IMPORT_', 'IMPORT: ').replace('ZONE_EXPORT_', 'EXPORT: ')
+    return p.replace('SUMMARY_TOTAL_IPP', 'Total IPP').replace('SUMMARY_TOTAL_NEA_SUBS', 'Total NEA Subsidiaries').replace('SUMMARY_TOTAL_ROR', 'Total ROR').replace('SUMMARY_TOTAL_STORAGE', 'Total Storage').replace('SUMMARY_TOTAL_IMPORT', 'Total IMPORT').replace('SUMMARY_TOTAL_EXPORT', 'Total EXPORT').replace('COMBINED_INTERRUPTION', 'Interruption / Tripping').replace('ZONE_IPP_', 'IPP: ').replace('ZONE_ROR_', 'ROR: ').replace('ZONE_STORAGE_', 'STORAGE: ').replace('ZONE_NEASUB_', 'SUB: ').replace('ZONE_IMPORT_', 'IMPORT: ').replace('ZONE_EXPORT_', 'EXPORT: ')
 
 @st.cache_data(show_spinner=False)
 def convert_df(df): return df.to_csv(index=False).encode('utf-8')
@@ -400,14 +368,35 @@ def update_chart_layout(fig, title, yaxis_title="Power (MW)", xaxis_title="Time"
     )
     return fig
 
-# 🚀 UPDATED CHART FUNCTION: Adds stack boolean to disable area filling for lines crossing zero
-def draw_stacked_chart(df_pivot, cols, title, total_col=None, show_export=False, export_col=None, stack=True):
+# 🚀 UPDATED CHART FUNCTION: Adds color formatting and zero-fill for split signs
+def draw_stacked_chart(df_pivot, cols, title, total_col=None, show_export=False, export_col=None, stack=True, split_signs=False):
     fig = go.Figure()
+    
     for i, col in enumerate(cols):
+        base_color = NEA_PALETTE[i % len(NEA_PALETTE)]
+        
         if stack:
-            fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[col], name=clean_param_name(col), stackgroup='one', line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)])))
+            fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[col], name=clean_param_name(col), stackgroup='one', line=dict(width=0.5, color=base_color)))
         else:
-            fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[col], name=clean_param_name(col), mode='lines', line=dict(width=2, color=NEA_PALETTE[i % len(NEA_PALETTE)])))
+            if split_signs:
+                # Plot the full line in primary color (Greenish for standard imports)
+                fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[col], name=f"{clean_param_name(col)}", mode='lines', line=dict(width=2, color=base_color)))
+                
+                # Overlay a red line with a red fill below zero for the negative values
+                if (df_pivot[col] < 0).any():
+                    neg_series = df_pivot[col].clip(upper=0)
+                    fig.add_trace(go.Scatter(
+                        x=df_pivot.index, 
+                        y=neg_series, 
+                        name=f"{clean_param_name(col)} (Exporting)", 
+                        mode='lines', 
+                        line=dict(width=2, color='#d62728'), # Red
+                        fill='tozeroy',
+                        fillcolor='rgba(214, 39, 40, 0.2)', # Transparent Red Fill
+                        showlegend=False
+                    ))
+            else:
+                fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[col], name=clean_param_name(col), mode='lines', line=dict(width=2, color=base_color)))
     
     if show_export and export_col and export_col in df_pivot.columns:
         if stack:
@@ -420,8 +409,9 @@ def draw_stacked_chart(df_pivot, cols, title, total_col=None, show_export=False,
 
     fig = update_chart_layout(fig, title, legend_orientation="v")
     
-    if not stack:
-        fig.add_hline(y=0, line_width=1.5, line_color="#1e1e1e", opacity=0.5, line_dash="dash")
+    # Emphasize the Zero Line if values cross axes
+    if not stack or split_signs:
+        fig.add_hline(y=0, line_width=1.5, line_color="#1e1e1e", opacity=0.8)
         
     st.plotly_chart(fig, use_container_width=True)
 
@@ -448,7 +438,7 @@ def generate_nea_excel_report(df_piv, df_all, date_str, metrics_dict, val_comps)
         def write_zone_matrix_sheet(prefix, sheet_name):
             df_zone = df_all[df_all['parameter_name'].str.startswith(prefix)].copy()
             if df_zone.empty:
-                pd.DataFrame({"Message": [f"No {sheet_name} data available."]}).to_excel(writer, sheet_name=sheet_name, index=False)
+                pd.DataFrame({"Message": [f"No data."]}).to_excel(writer, sheet_name=sheet_name, index=False)
                 return
             df_zone['MW'] = df_zone['MW'].abs()
             df_p = df_zone.pivot(index='Time', columns='parameter_name', values='MW').fillna(0.0)
@@ -469,27 +459,19 @@ def generate_nea_excel_report(df_piv, df_all, date_str, metrics_dict, val_comps)
 
         border_cell = Border(left=Side(border_style="thin", color="D0D7DE"), right=Side(border_style="thin", color="D0D7DE"), top=Side(border_style="thin", color="D0D7DE"), bottom=Side(border_style="thin", color="D0D7DE"))
         border_kpi = Border(left=Side(border_style="thick", color="0052CC"), right=Side(border_style="thin", color="D0D7DE"), top=Side(border_style="thin", color="D0D7DE"), bottom=Side(border_style="thin", color="D0D7DE"))
-
         align_center, align_left, align_right = Alignment(horizontal="center", vertical="center", wrap_text=True), Alignment(horizontal="left", vertical="center"), Alignment(horizontal="right", vertical="center")
 
         ws_sum.views.sheetView[0].showGridLines = True
         ws_sum.merge_cells("A1:I1")
-        ws_sum["A1"] = "⚡ NEPAL ELECTRICITY AUTHORITY - LOAD DISPATCH CENTRE (LDC)"
-        ws_sum["A1"].font = font_title
-        ws_sum["A1"].fill = nea_blue
-        ws_sum["A1"].alignment = align_center
+        ws_sum["A1"], ws_sum["A1"].font, ws_sum["A1"].fill, ws_sum["A1"].alignment = "⚡ NEPAL ELECTRICITY AUTHORITY - LOAD DISPATCH CENTRE (LDC)", font_title, nea_blue, align_center
         ws_sum.row_dimensions[1].height = 32
 
         ws_sum.merge_cells("A2:I2")
-        ws_sum["A2"] = f"Daily System Operation & Load Summary Report  |  Nepali Date: {date_str}"
-        ws_sum["A2"].font = font_subtitle
-        ws_sum["A2"].fill = nea_blue
-        ws_sum["A2"].alignment = align_center
+        ws_sum["A2"], ws_sum["A2"].font, ws_sum["A2"].fill, ws_sum["A2"].alignment = f"Daily System Operation & Load Summary Report  |  Nepali Date: {date_str}", font_subtitle, nea_blue, align_center
         ws_sum.row_dimensions[2].height = 20
 
         ws_sum.merge_cells("A4:I4")
-        ws_sum["A4"] = "1. KEY OPERATIONAL METRICS (DAILY PEAKS & LOAD FACTOR)"
-        ws_sum["A4"].font, ws_sum["A4"].fill = font_sec_hdr, sub_header_fill
+        ws_sum["A4"], ws_sum["A4"].font, ws_sum["A4"].fill = "1. KEY OPERATIONAL METRICS (DAILY PEAKS & LOAD FACTOR)", font_sec_hdr, sub_header_fill
         ws_sum.row_dimensions[4].height = 22
 
         kpi_headers = ["Metric Parameter", "Recorded Value", "Peak Time / Unit", "", "System Indicator", "Value", "Remarks"]
@@ -515,8 +497,7 @@ def generate_nea_excel_report(df_piv, df_all, date_str, metrics_dict, val_comps)
                 else: cell.font, cell.alignment = font_regular, align_center
 
         ws_sum.merge_cells("A10:G10")
-        ws_sum["A10"] = "2. GENERATION, TRADE & LOAD BREAKDOWN SUMMARY"
-        ws_sum["A10"].font, ws_sum["A10"].fill = font_sec_hdr, sub_header_fill
+        ws_sum["A10"], ws_sum["A10"].font, ws_sum["A10"].fill = "2. GENERATION, TRADE & LOAD BREAKDOWN SUMMARY", font_sec_hdr, sub_header_fill
         ws_sum.row_dimensions[10].height = 22
 
         tbl_headers = ["Component / Parameter", "Max Peak (MW)", "Peak Time", "Min (MW)", "Average (MW)", "Daily Energy (MWh)", "Share of Sys Load (%)"]
@@ -540,9 +521,8 @@ def generate_nea_excel_report(df_piv, df_all, date_str, metrics_dict, val_comps)
 
             for c_idx, val in enumerate(row_vals, start=1):
                 cell = ws_sum.cell(row=idx, column=c_idx, value=val)
-                cell.font = font_bold if is_total_row else font_regular
+                cell.font, cell.border = (font_bold if is_total_row else font_regular), border_cell
                 cell.fill = sub_header_fill if is_total_row else (zebra_fill if idx % 2 == 1 else PatternFill(fill_type=None))
-                cell.border = border_cell
                 if c_idx == 1: cell.alignment = align_left
                 elif c_idx == 3: cell.alignment = align_center
                 elif isinstance(val, (int, float)): cell.number_format, cell.alignment = "#,##0.00", align_right
@@ -555,16 +535,13 @@ def generate_nea_excel_report(df_piv, df_all, date_str, metrics_dict, val_comps)
             df_p = df_zone.pivot(index='Time', columns='parameter_name', values='MW').fillna(0.0)
             records = []
             for col in df_p.columns:
-                plant_name = col.replace(prefix, '').strip()
                 s = df_p[col]
                 pk_mw = float(s.max())
-                if pk_mw > 0:
-                    records.append((plant_name, pk_mw, str(s.idxmax()), float(s.mean()), float(s.sum() * interval_hrs)))
+                if pk_mw > 0: records.append((col.replace(prefix, '').strip(), pk_mw, str(s.idxmax()), float(s.mean()), float(s.sum() * interval_hrs)))
             records.sort(key=lambda x: (x[1], x[4]), reverse=True)
             return records[:n]
 
         top_ipps, top_rors = get_top_n_plants('ZONE_IPP_', 5), get_top_n_plants('ZONE_ROR_', 5)
-
         sec3_start_row = 12 + len(display_cols) + 2
         ws_sum.merge_cells(start_row=sec3_start_row, start_column=1, end_row=sec3_start_row, end_column=9)
         ws_sum.cell(row=sec3_start_row, column=1, value="3. TOP 5 INDIVIDUAL IPP & ROR PLANTS BY PEAK GENERATION (MW)")
@@ -633,8 +610,7 @@ def generate_nea_excel_report(df_piv, df_all, date_str, metrics_dict, val_comps)
 
         for ws in [ws_sum, ws_log, ws_ipp, ws_ror]:
             for col in ws.columns:
-                max_len = max(len(str(cell.value or "")) for cell in col)
-                ws.column_dimensions[get_column_letter(col[0].column)].width = max(max_len + 4, 14)
+                ws.column_dimensions[get_column_letter(col[0].column)].width = max(max(len(str(c.value or "")) for c in col) + 4, 14)
         ws_sum.column_dimensions["E"].width = 4 
 
     return output.getvalue()
@@ -783,10 +759,9 @@ with t1:
                 
                 st.markdown("<br>", unsafe_allow_html=True)
                 fig_main = go.Figure()
-                NEA_PALETTE_MAIN = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2']
                 
                 for i, col in enumerate(val_comps):
-                    fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv[col], name=clean_param_name(col.replace('Net IMPORT', 'Net IMPORT')), stackgroup='supply_stack', line=dict(width=0.5, color=NEA_PALETTE_MAIN[i % len(NEA_PALETTE_MAIN)]), hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'))
+                    fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv[col], name=clean_param_name(col.replace('Net IMPORT', 'Net IMPORT')), stackgroup='supply_stack', line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)]), hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'))
                 if df_piv['SUMMARY_TOTAL_EXPORT'].abs().sum() > 0:
                     fig_main.add_trace(go.Scatter(x=df_piv.index, y=-df_piv['SUMMARY_TOTAL_EXPORT'].abs(), name='Total EXPORT', stackgroup='export_stack', line=dict(width=0.5, color='#d62728')))
                 fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv['TOTAL SYSTEM LOAD (ACTUAL)'], name='TOTAL SYSTEM LOAD (ACTUAL)', line=dict(color='#ff3366', width=2.5, dash='dot')))
@@ -803,7 +778,7 @@ with t1:
                     display_cols = ['TOTAL SYSTEM LOAD (ACTUAL)', 'TOTAL SYSTEM LOAD (EXPECTED)', 'TOTAL NATIONAL LOAD (ACTUAL)'] + val_comps + ['SUMMARY_TOTAL_EXPORT', 'COMBINED_INTERRUPTION']
                     st.dataframe(df_piv[display_cols].style.format("{:.2f}"), use_container_width=True)
 
-            def render_sub(prefix, title, enable_plant_filter=False, use_abs=True, stack=True):
+            def render_sub(prefix, title, enable_plant_filter=False, use_abs=True, stack=True, split_signs=False, noise_filter=0.0):
                 df_sub = df_all[df_all['parameter_name'].str.startswith(prefix)].copy()
                 if not df_sub.empty:
                     df_sub['parameter_name'] = df_sub['parameter_name'].str.replace(prefix, '')
@@ -811,6 +786,9 @@ with t1:
                     
                     if use_abs:
                         df_p = df_p.abs()
+                    elif noise_filter > 0.0:
+                        # Filter out instrument noise (e.g., -0.01 to 0.01 becomes 0)
+                        df_p = df_p.map(lambda x: 0.0 if abs(x) < noise_filter else x)
                         
                     v_cols = [c for c in df_p.columns if df_p[c].abs().sum() > 0]
                     
@@ -826,7 +804,7 @@ with t1:
                     plot_cols = selected_plants if enable_plant_filter else v_cols
                     df_p['TOTAL'] = df_p[plot_cols].sum(axis=1)
                     
-                    draw_stacked_chart(df_p, plot_cols, title, 'TOTAL', show_export=False, stack=stack)
+                    draw_stacked_chart(df_p, plot_cols, title, 'TOTAL', show_export=False, stack=stack, split_signs=split_signs)
                     
                     with st.expander(f"🔍 View & Export {title} Data"):
                         st.dataframe(df_p[plot_cols + ['TOTAL']].style.format("{:.2f}"), use_container_width=True)
@@ -835,8 +813,8 @@ with t1:
                     st.info(f"No {title} data found.")
 
             with st2:
-                # 🚀 IMPORT TAB EXPLICITLY ALLOWS NEGATIVE VALUES & DISABLES AREA STACKING
-                render_sub('ZONE_IMPORT_', 'Dynamic Breakdown: Import (Raw Excel Values)', enable_plant_filter=False, use_abs=False, stack=False)
+                # 🚀 IMPORT TAB: Raw values, noise filter applied, splitting signs for distinct visualization
+                render_sub('ZONE_IMPORT_', 'Dynamic Breakdown: Import (Raw Excel Values)', enable_plant_filter=False, use_abs=False, stack=False, split_signs=True, noise_filter=0.5)
             with st3:
                 render_sub('ZONE_NEASUB_', 'Dynamic Breakdown: NEA Subsidiaries', enable_plant_filter=False, use_abs=True, stack=True)
             with st4:
