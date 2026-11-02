@@ -40,7 +40,6 @@ def init_db():
             conn = sqlite3.connect(DATABASE_NAME, timeout=30.0)
             cursor = conn.cursor()
             
-            # 🚀 OPTIMIZED SQLITE SETTINGS FOR MASSIVE INSERTS
             cursor.execute('PRAGMA journal_mode=WAL;')
             cursor.execute('PRAGMA synchronous=NORMAL;')
             cursor.execute('PRAGMA cache_size=-64000;')
@@ -100,7 +99,6 @@ def run_query(query, params=()):
     return df
 
 def backup_database():
-    """Safely backs up the live SQLite database without locking readers/writers."""
     if not os.path.exists(BACKUP_FOLDER):
         os.makedirs(BACKUP_FOLDER)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -118,7 +116,6 @@ def backup_database():
         return False, f"❌ Backup failed: {e}"
 
 def automated_backup_worker():
-    """Runs a safe SQLite backup every 24 hours."""
     while True:
         time.sleep(86400) 
         try:
@@ -207,7 +204,6 @@ def extract_data(df, year, month, day, cursor):
                 if clean_val in ['', '-']:
                     final_value = 0.0
                 else:
-                    # 🚀 PRESERVE ORIGINAL SIGN: Do not use abs() here. Maintain raw Excel integrity.
                     final_value = float(clean_val)
             except:
                 final_value = 0.0
@@ -217,7 +213,6 @@ def extract_data(df, year, month, day, cursor):
     bulk_insert_data = []
 
     for time_interval, params in daily_data.items():
-        # 🚀 MATH INTEGRITY: Force absolute values ONLY for calculating accurate structural totals.
         ipp = abs(params.get('SUMMARY_TOTAL_IPP', 0.0))
         nea = abs(params.get('SUMMARY_TOTAL_NEA_SUBS', 0.0))
         ror = abs(params.get('SUMMARY_TOTAL_ROR', 0.0))
@@ -240,7 +235,6 @@ def extract_data(df, year, month, day, cursor):
             bulk_insert_data.append((year, month, day, time_interval, p_name, val))
             rows_inserted += 1
 
-    # 🚀 EXECUTEMANY: C-Level optimization for batch insertion
     cursor.executemany('''
         INSERT INTO system_log_data (nepali_year, nepali_month, nepali_day, time_interval, parameter_name, value)
         VALUES (?, ?, ?, ?, ?, ?) 
@@ -283,7 +277,6 @@ def process_file(file_path):
         if not file_bytes: return
         file_io, rows_inserted = io.BytesIO(file_bytes), 0
 
-        # 🚀 CORRUPT FILE HANDLING
         try:
             if filename.lower().endswith('.csv'):
                 day_match = re.search(r'-\s*(\d+)\.csv$', filename.lower())
@@ -308,7 +301,6 @@ def process_file(file_path):
 
         if rows_inserted > 0:
             cursor.execute("INSERT INTO processed_files (filename, mtime) VALUES (?, ?) ON CONFLICT(filename) DO UPDATE SET mtime=excluded.mtime", (file_path, mtime))
-            # Immediate commit unlocks the DB for Streamlit UI
             conn.commit()
             st.cache_data.clear()
 
@@ -328,7 +320,6 @@ def process_file(file_path):
 # 3. BACKGROUND FOLDER MONITOR
 # ==========================================
 def process_queue_worker():
-    """Background worker that pulls files from the queue to prevent memory spikes."""
     while True:
         file_path = file_queue.get()
         try:
@@ -409,18 +400,29 @@ def update_chart_layout(fig, title, yaxis_title="Power (MW)", xaxis_title="Time"
     )
     return fig
 
-def draw_stacked_chart(df_pivot, cols, title, total_col=None, show_export=False, export_col=None):
+# 🚀 UPDATED CHART FUNCTION: Adds stack boolean to disable area filling for lines crossing zero
+def draw_stacked_chart(df_pivot, cols, title, total_col=None, show_export=False, export_col=None, stack=True):
     fig = go.Figure()
     for i, col in enumerate(cols):
-        fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[col], name=clean_param_name(col), stackgroup='one', line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)])))
+        if stack:
+            fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[col], name=clean_param_name(col), stackgroup='one', line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)])))
+        else:
+            fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[col], name=clean_param_name(col), mode='lines', line=dict(width=2, color=NEA_PALETTE[i % len(NEA_PALETTE)])))
     
     if show_export and export_col and export_col in df_pivot.columns:
-        fig.add_trace(go.Scatter(x=df_pivot.index, y=-df_pivot[export_col].abs(), name='Total EXPORT', stackgroup='two', line=dict(width=0.5, color='#d62728')))
+        if stack:
+            fig.add_trace(go.Scatter(x=df_pivot.index, y=-df_pivot[export_col].abs(), name='Total EXPORT', stackgroup='two', line=dict(width=0.5, color='#d62728')))
+        else:
+            fig.add_trace(go.Scatter(x=df_pivot.index, y=-df_pivot[export_col].abs(), name='Total EXPORT', mode='lines', line=dict(width=2, color='#d62728')))
     
     if total_col and total_col in df_pivot.columns:
         fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[total_col], name='TOTAL', line=dict(color='#1e1e1e', width=3)))
 
     fig = update_chart_layout(fig, title, legend_orientation="v")
+    
+    if not stack:
+        fig.add_hline(y=0, line_width=1.5, line_color="#1e1e1e", opacity=0.5, line_dash="dash")
+        
     st.plotly_chart(fig, use_container_width=True)
 
 @st.cache_data(show_spinner=False)
@@ -801,13 +803,12 @@ with t1:
                     display_cols = ['TOTAL SYSTEM LOAD (ACTUAL)', 'TOTAL SYSTEM LOAD (EXPECTED)', 'TOTAL NATIONAL LOAD (ACTUAL)'] + val_comps + ['SUMMARY_TOTAL_EXPORT', 'COMBINED_INTERRUPTION']
                     st.dataframe(df_piv[display_cols].style.format("{:.2f}"), use_container_width=True)
 
-            def render_sub(prefix, title, enable_plant_filter=False, use_abs=True):
+            def render_sub(prefix, title, enable_plant_filter=False, use_abs=True, stack=True):
                 df_sub = df_all[df_all['parameter_name'].str.startswith(prefix)].copy()
                 if not df_sub.empty:
                     df_sub['parameter_name'] = df_sub['parameter_name'].str.replace(prefix, '')
                     df_p = df_sub.pivot(index='Time', columns='parameter_name', values='MW').sort_index().interpolate(method='linear').fillna(0.0)
                     
-                    # 🚀 CORE FIX: Only force positive values if use_abs is True. Preserves native Excel signs for Total Import.
                     if use_abs:
                         df_p = df_p.abs()
                         
@@ -825,7 +826,7 @@ with t1:
                     plot_cols = selected_plants if enable_plant_filter else v_cols
                     df_p['TOTAL'] = df_p[plot_cols].sum(axis=1)
                     
-                    draw_stacked_chart(df_p, plot_cols, title, 'TOTAL', show_export=False)
+                    draw_stacked_chart(df_p, plot_cols, title, 'TOTAL', show_export=False, stack=stack)
                     
                     with st.expander(f"🔍 View & Export {title} Data"):
                         st.dataframe(df_p[plot_cols + ['TOTAL']].style.format("{:.2f}"), use_container_width=True)
@@ -834,16 +835,16 @@ with t1:
                     st.info(f"No {title} data found.")
 
             with st2:
-                # 🚀 TAB 2 IMPORT: use_abs=False prevents absolute casting. Excel values render EXACTLY as uploaded.
-                render_sub('ZONE_IMPORT_', 'Dynamic Breakdown: Import (Raw Excel Values)', enable_plant_filter=False, use_abs=False)
+                # 🚀 IMPORT TAB EXPLICITLY ALLOWS NEGATIVE VALUES & DISABLES AREA STACKING
+                render_sub('ZONE_IMPORT_', 'Dynamic Breakdown: Import (Raw Excel Values)', enable_plant_filter=False, use_abs=False, stack=False)
             with st3:
-                render_sub('ZONE_NEASUB_', 'Dynamic Breakdown: NEA Subsidiaries', enable_plant_filter=False, use_abs=True)
+                render_sub('ZONE_NEASUB_', 'Dynamic Breakdown: NEA Subsidiaries', enable_plant_filter=False, use_abs=True, stack=True)
             with st4:
-                render_sub('ZONE_IPP_', 'Dynamic Breakdown: Independent Power Producers (IPP)', enable_plant_filter=True, use_abs=True)
+                render_sub('ZONE_IPP_', 'Dynamic Breakdown: Independent Power Producers (IPP)', enable_plant_filter=True, use_abs=True, stack=True)
             with st5:
-                render_sub('ZONE_ROR_', 'Dynamic Breakdown: Run of River (ROR) Plants', enable_plant_filter=True, use_abs=True)
+                render_sub('ZONE_ROR_', 'Dynamic Breakdown: Run of River (ROR) Plants', enable_plant_filter=True, use_abs=True, stack=True)
             with st6:
-                render_sub('ZONE_STORAGE_', 'Storage Plants', enable_plant_filter=False, use_abs=True)
+                render_sub('ZONE_STORAGE_', 'Storage Plants', enable_plant_filter=False, use_abs=True, stack=True)
 
 with t2:
     st.subheader(f"📊 Daily Peak Loads for Month {selected_month}, {selected_year}")
@@ -851,10 +852,10 @@ with t2:
     df_raw = run_query(query_monthly, (selected_year, selected_month))
 
     if not df_raw.empty:
+        df_raw['value'] = pd.to_numeric(df_raw['value'], errors='coerce').fillna(0.0).abs()
         df_piv = df_raw.pivot_table(index=['nepali_day', 'time_interval'], columns='parameter_name', values='value').fillna(0.0).reset_index()
         for col in ['TOTAL SYSTEM LOAD (ACTUAL)', 'TOTAL NATIONAL LOAD (ACTUAL)', 'SUMMARY_TOTAL_IMPORT', 'SUMMARY_TOTAL_EXPORT']:
             if col not in df_piv.columns: df_piv[col] = 0.0
-            else: df_piv[col] = df_piv[col].abs()
 
         df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] + df_piv['SUMMARY_TOTAL_EXPORT'] - df_piv['SUMMARY_TOTAL_IMPORT']
 
@@ -874,10 +875,10 @@ with t3:
     df_raw = run_query(query_historical)
 
     if not df_raw.empty:
+        df_raw['value'] = pd.to_numeric(df_raw['value'], errors='coerce').fillna(0.0).abs()
         df_piv = df_raw.pivot_table(index=['nepali_year', 'nepali_month', 'nepali_day', 'time_interval'], columns='parameter_name', values='value').fillna(0.0).reset_index()
         for col in ['TOTAL SYSTEM LOAD (ACTUAL)', 'TOTAL NATIONAL LOAD (ACTUAL)', 'SUMMARY_TOTAL_IMPORT', 'SUMMARY_TOTAL_EXPORT']:
             if col not in df_piv.columns: df_piv[col] = 0.0
-            else: df_piv[col] = df_piv[col].abs()
 
         df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] + df_piv['SUMMARY_TOTAL_EXPORT'] - df_piv['SUMMARY_TOTAL_IMPORT']
 
