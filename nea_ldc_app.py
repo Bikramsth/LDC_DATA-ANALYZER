@@ -368,7 +368,6 @@ def update_chart_layout(fig, title, yaxis_title="Power (MW)", xaxis_title="Time"
     )
     return fig
 
-# 🚀 UPDATED CHART FUNCTION: Adds color formatting and zero-fill for split signs
 def draw_stacked_chart(df_pivot, cols, title, total_col=None, show_export=False, export_col=None, stack=True, split_signs=False):
     fig = go.Figure()
     
@@ -379,10 +378,7 @@ def draw_stacked_chart(df_pivot, cols, title, total_col=None, show_export=False,
             fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[col], name=clean_param_name(col), stackgroup='one', line=dict(width=0.5, color=base_color)))
         else:
             if split_signs:
-                # Plot the full line in primary color (Greenish for standard imports)
                 fig.add_trace(go.Scatter(x=df_pivot.index, y=df_pivot[col], name=f"{clean_param_name(col)}", mode='lines', line=dict(width=2, color=base_color)))
-                
-                # Overlay a red line with a red fill below zero for the negative values
                 if (df_pivot[col] < 0).any():
                     neg_series = df_pivot[col].clip(upper=0)
                     fig.add_trace(go.Scatter(
@@ -390,9 +386,9 @@ def draw_stacked_chart(df_pivot, cols, title, total_col=None, show_export=False,
                         y=neg_series, 
                         name=f"{clean_param_name(col)} (Exporting)", 
                         mode='lines', 
-                        line=dict(width=2, color='#d62728'), # Red
+                        line=dict(width=2, color='#d62728'),
                         fill='tozeroy',
-                        fillcolor='rgba(214, 39, 40, 0.2)', # Transparent Red Fill
+                        fillcolor='rgba(214, 39, 40, 0.2)',
                         showlegend=False
                     ))
             else:
@@ -409,7 +405,6 @@ def draw_stacked_chart(df_pivot, cols, title, total_col=None, show_export=False,
 
     fig = update_chart_layout(fig, title, legend_orientation="v")
     
-    # Emphasize the Zero Line if values cross axes
     if not stack or split_signs:
         fig.add_hline(y=0, line_width=1.5, line_color="#1e1e1e", opacity=0.8)
         
@@ -787,7 +782,6 @@ with t1:
                     if use_abs:
                         df_p = df_p.abs()
                     elif noise_filter > 0.0:
-                        # Filter out instrument noise (e.g., -0.01 to 0.01 becomes 0)
                         df_p = df_p.map(lambda x: 0.0 if abs(x) < noise_filter else x)
                         
                     v_cols = [c for c in df_p.columns if df_p[c].abs().sum() > 0]
@@ -813,8 +807,8 @@ with t1:
                     st.info(f"No {title} data found.")
 
             with st2:
-                # 🚀 IMPORT TAB: Raw values, noise filter applied, splitting signs for distinct visualization
-                render_sub('ZONE_IMPORT_', 'Dynamic Breakdown: Import (Raw Excel Values)', enable_plant_filter=False, use_abs=False, stack=False, split_signs=True, noise_filter=0.5)
+                # 🚀 IMPORT TAB: Raw values, NO noise filter, NO split signs to maintain pure raw Excel data plotting
+                render_sub('ZONE_IMPORT_', 'Dynamic Breakdown: Import (Raw Excel Values)', enable_plant_filter=False, use_abs=False, stack=False, split_signs=False, noise_filter=0.0)
             with st3:
                 render_sub('ZONE_NEASUB_', 'Dynamic Breakdown: NEA Subsidiaries', enable_plant_filter=False, use_abs=True, stack=True)
             with st4:
