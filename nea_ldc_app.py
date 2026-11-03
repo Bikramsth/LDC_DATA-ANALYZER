@@ -726,26 +726,24 @@ with t1:
                     if col not in df_piv.columns: df_piv[col] = 0.0
                     else: df_piv[col] = df_piv[col].abs()
 
-                df_piv['Net IMPORT'] = df_piv['SUMMARY_TOTAL_IMPORT'] - df_piv['SUMMARY_TOTAL_EXPORT'].abs()
-                supply_cols = ['SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'Net IMPORT']
+                df_piv['Net Import/Export'] = df_piv['SUMMARY_TOTAL_IMPORT'] - df_piv['SUMMARY_TOTAL_EXPORT'].abs()
+                supply_cols = ['SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'Net Import/Export']
                 val_comps = [col for col in supply_cols if df_piv[col].abs().sum() > 0 or 'STORAGE' in col]
 
-                if df_piv['TOTAL SYSTEM LOAD (ACTUAL)'].sum() == 0: df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = df_piv[supply_cols].sum(axis=1)
-                if df_piv['TOTAL SYSTEM LOAD (EXPECTED)'].sum() == 0: df_piv['TOTAL SYSTEM LOAD (EXPECTED)'] = df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] + df_piv['COMBINED_INTERRUPTION']
-                df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] + df_piv['SUMMARY_TOTAL_EXPORT'] - df_piv['SUMMARY_TOTAL_IMPORT']
+                sys_exp_peak_hour, sys_exp_peak_val = df_piv['TOTAL SYSTEM LOAD (EXPECTED)'].idxmax(), df_piv['TOTAL SYSTEM LOAD (EXPECTED)'].max()
+
+                df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] + df_piv['Net Import/Export'].abs()
 
                 sys_act_peak_hour, sys_act_peak_val = df_piv['TOTAL SYSTEM LOAD (ACTUAL)'].idxmax(), df_piv['TOTAL SYSTEM LOAD (ACTUAL)'].max()
-                sys_exp_peak_hour, sys_exp_peak_val = df_piv['TOTAL SYSTEM LOAD (EXPECTED)'].idxmax(), df_piv['TOTAL SYSTEM LOAD (EXPECTED)'].max()
                 nat_act_peak_hour, nat_act_peak_val = df_piv['TOTAL NATIONAL LOAD (ACTUAL)'].idxmax(), df_piv['TOTAL NATIONAL LOAD (ACTUAL)'].max()
                 total_energy_mwh, load_factor = df_piv['TOTAL SYSTEM LOAD (ACTUAL)'].sum(), (df_piv['TOTAL SYSTEM LOAD (ACTUAL)'].mean() / sys_act_peak_val * 100) if sys_act_peak_val > 0 else 0
 
                 st.markdown("<br>", unsafe_allow_html=True)
-                m1, m2, m3, m4, m5 = st.columns(5)
+                m1, m2, m3, m4 = st.columns(4)
                 m1.metric(f"📈 Sys Load Actual ({sys_act_peak_hour})", f"{sys_act_peak_val:.2f} MW")
-                m2.metric(f"⚠️ Sys Load Expected ({sys_exp_peak_hour})", f"{sys_exp_peak_val:.2f} MW")
-                m3.metric(f"📊 Nat Load Actual ({nat_act_peak_hour})", f"{nat_act_peak_val:.2f} MW")
-                m4.metric(f"⚡ Total Energy", f"{total_energy_mwh:,.0f} MWh")
-                m5.metric(f"⚙️ Load Factor", f"{load_factor:.1f}%")
+                m2.metric(f"📊 Nat Load Actual ({nat_act_peak_hour})", f"{nat_act_peak_val:.2f} MW")
+                m3.metric(f"⚡ Total Energy", f"{total_energy_mwh:,.0f} MWh")
+                m4.metric(f"⚙️ Load Factor", f"{load_factor:.1f}%")
                 
                 report_metrics = {'sys_act_hr': sys_act_peak_hour, 'sys_act_val': sys_act_peak_val, 'sys_exp_hr': sys_exp_peak_hour, 'sys_exp_val': sys_exp_peak_val, 'nat_act_hr': nat_act_peak_hour, 'nat_act_val': nat_act_peak_val, 'energy_mwh': total_energy_mwh, 'load_factor': load_factor}
                 btn_col1, btn_col2 = st.columns([1, 3])
@@ -756,11 +754,9 @@ with t1:
                 fig_main = go.Figure()
                 
                 for i, col in enumerate(val_comps):
-                    fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv[col], name=clean_param_name(col.replace('Net IMPORT', 'Net IMPORT')), stackgroup='supply_stack', line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)]), hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'))
-                if df_piv['SUMMARY_TOTAL_EXPORT'].abs().sum() > 0:
-                    fig_main.add_trace(go.Scatter(x=df_piv.index, y=-df_piv['SUMMARY_TOTAL_EXPORT'].abs(), name='Total EXPORT', stackgroup='export_stack', line=dict(width=0.5, color='#d62728')))
+                    fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv[col], name=clean_param_name(col), stackgroup='supply_stack', line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)]), hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'))
+                
                 fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv['TOTAL SYSTEM LOAD (ACTUAL)'], name='TOTAL SYSTEM LOAD (ACTUAL)', line=dict(color='#ff3366', width=2.5, dash='dot')))
-                fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv['TOTAL SYSTEM LOAD (EXPECTED)'], name='TOTAL SYSTEM LOAD (EXPECTED)', line=dict(color='#8c564b', width=2.5, dash='dashdot')))
                 fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv['TOTAL NATIONAL LOAD (ACTUAL)'], name='TOTAL NATIONAL LOAD (ACTUAL)', line=dict(color='#1e1e1e', width=3)))
                 if df_piv['COMBINED_INTERRUPTION'].sum() > 0:
                     fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv['COMBINED_INTERRUPTION'], name='Interruption/Tripping', line=dict(color='#ff7f0e', width=2)))
@@ -770,7 +766,7 @@ with t1:
                 st.plotly_chart(fig_main, use_container_width=True)
 
                 with st.expander("🔍 View Filtered Supply Components & Loads"):
-                    display_cols = ['TOTAL SYSTEM LOAD (ACTUAL)', 'TOTAL SYSTEM LOAD (EXPECTED)', 'TOTAL NATIONAL LOAD (ACTUAL)'] + val_comps + ['SUMMARY_TOTAL_EXPORT', 'COMBINED_INTERRUPTION']
+                    display_cols = ['TOTAL SYSTEM LOAD (ACTUAL)', 'TOTAL NATIONAL LOAD (ACTUAL)'] + val_comps + ['COMBINED_INTERRUPTION']
                     st.dataframe(df_piv[display_cols].style.format("{:.2f}"), use_container_width=True)
 
             def render_sub(prefix, title, enable_plant_filter=False, use_abs=True, stack=True, split_signs=False, noise_filter=0.0):
@@ -807,7 +803,7 @@ with t1:
                     st.info(f"No {title} data found.")
 
             with st2:
-                # 🚀 IMPORT TAB: Raw values, NO noise filter, NO split signs to maintain pure raw Excel data plotting
+                # 🚀 IMPORT TAB: Raw values exactly as in Excel, NO split signs, NO noise filter
                 render_sub('ZONE_IMPORT_', 'Dynamic Breakdown: Import (Raw Excel Values)', enable_plant_filter=False, use_abs=False, stack=False, split_signs=False, noise_filter=0.0)
             with st3:
                 render_sub('ZONE_NEASUB_', 'Dynamic Breakdown: NEA Subsidiaries', enable_plant_filter=False, use_abs=True, stack=True)
