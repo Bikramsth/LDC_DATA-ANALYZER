@@ -277,7 +277,7 @@ def process_file(file_path):
                     rows_inserted += extract_data(df, year, month, day, cursor)
                     del df
             else:
-                xl = pd.ExcelFile(file_io, engine='openpyxl')
+               xl = pd.ExcelFile(file_io, engine='calamine')
                 for sheet in xl.sheet_names:
                     if sheet.strip().isdigit():
                         day = int(sheet.strip())
