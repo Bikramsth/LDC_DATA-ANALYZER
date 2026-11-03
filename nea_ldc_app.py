@@ -258,32 +258,38 @@ def process_file(file_path):
             conn.close()
             return
 
-        file_bytes = None
-        for _ in range(3):
-            try:
-                with open(file_path, 'rb') as f: file_bytes = f.read()
-                break
-            except PermissionError: time.sleep(1)
+        rows_inserted = 0
 
-        if not file_bytes: return
-        file_io, rows_inserted = io.BytesIO(file_bytes), 0
-
+        # 🚀 MEMORY FIX: Read directly from file_path, bypassing massive bytes RAM buffers
         try:
             if filename.lower().endswith('.csv'):
                 day_match = re.search(r'-\s*(\d+)\.csv$', filename.lower())
                 day = int(day_match.group(1)) if day_match else None
                 if day is not None and day > 0:  
-                    df = pd.read_csv(file_io, header=None, on_bad_lines='skip')
-                    rows_inserted += extract_data(df, year, month, day, cursor)
-                    del df
+                    for _ in range(3):
+                        try:
+                            df = pd.read_csv(file_path, header=None, on_bad_lines='skip')
+                            rows_inserted += extract_data(df, year, month, day, cursor)
+                            del df
+                            break
+                        except PermissionError:
+                            time.sleep(1)
             else:
-               xl = pd.ExcelFile(file_io, engine='calamine')
-                for sheet in xl.sheet_names:
-                    if sheet.strip().isdigit():
-                        day = int(sheet.strip())
-                        if day > 0:  
-                            rows_inserted += extract_data(xl.parse(sheet, header=None), year, month, day, cursor)
-                del xl
+                for _ in range(3):
+                    try:
+                        xl = pd.ExcelFile(file_path, engine='calamine')
+                        for sheet in xl.sheet_names:
+                            if sheet.strip().isdigit():
+                                day = int(sheet.strip())
+                                if day > 0:  
+                                    sheet_df = xl.parse(sheet, header=None)
+                                    rows_inserted += extract_data(sheet_df, year, month, day, cursor)
+                                    del sheet_df
+                                    gc.collect() # 🚀 Clear sheet from memory instantly
+                        del xl
+                        break
+                    except PermissionError:
+                        time.sleep(1)
 
         except zipfile.BadZipFile:
             raise ValueError("File is corrupted or password protected.")
@@ -301,6 +307,7 @@ def process_file(file_path):
     except Exception: pass
     finally:
         if 'conn' in locals(): conn.close()
+        gc.collect()
 
 # ==========================================
 # 3. BACKGROUND FOLDER MONITOR
@@ -834,6 +841,9 @@ with t1:
                 render_sub('ZONE_ROR_', 'Dynamic Breakdown: Run of River (ROR) Plants', enable_plant_filter=True, use_abs=True, stack=True)
             with st6:
                 render_sub('ZONE_STORAGE_', 'Storage Plants', enable_plant_filter=False, use_abs=True, stack=True)
+            
+            del df_all
+            gc.collect()
 
 with t2:
     st.subheader(f"📊 Daily Peak Loads for Month {selected_month}, {selected_year}")
@@ -912,6 +922,8 @@ with t4:
                 fig_comp.add_trace(go.Scatter(x=df_d['time_interval'], y=df_d['value'], name=d_str, mode='lines', line=dict(dash='dot', color=NEA_PALETTE[i % len(NEA_PALETTE)])))
                 p_v = df_d['value'].max()
                 metrics.append({"Target Date": d_str, "Peak (MW)": p_v, "Time": df_d.loc[df_d['value'].idxmax(), 'time_interval'], "Delta (MW)": (p_v - base_v) if base_v else 0, "Var (%)": ((p_v - base_v) / base_v * 100) if base_v else 0})
+                del df_d
+                gc.collect()
 
         if metrics:
             fig_comp = update_chart_layout(fig_comp, f"Date Comparison: {clean_param_name(comp_param)}", legend_orientation="v")
@@ -939,6 +951,8 @@ with t4:
                 fig_comp2.add_trace(go.Scatter(x=df_p['time_interval'], y=df_p['value'], name=clean_param_name(p), mode='lines', line=dict(dash='dot', color=NEA_PALETTE[i % len(NEA_PALETTE)])))
                 p_v = df_p['value'].max()
                 metrics2.append({"Parameter": clean_param_name(p), "Peak (MW)": p_v, "Time": df_p.loc[df_p['value'].idxmax(), 'time_interval'], "Delta (MW)": (p_v - base_v) if base_v else 0, "Var (%)": ((p_v - base_v) / base_v * 100) if base_v else 0})
+                del df_p
+                gc.collect()
 
         if metrics2:
             fig_comp2 = update_chart_layout(fig_comp2, "Parameter Overlay Analytics", legend_orientation="v")
@@ -961,6 +975,8 @@ with t4:
                 m_peak = df_peaks['value'].max()
                 if i == 0: base_v = m_peak
                 metrics3.append({"Month": l_name, "Abs Peak": m_peak, "Avg Peak": df_peaks['value'].mean(), "Delta": (m_peak - base_v) if base_v else 0, "Var (%)": ((m_peak - base_v) / base_v * 100) if base_v else 0})
+                del df_m
+                gc.collect()
 
         if metrics3:
             fig_comp3 = update_chart_layout(fig_comp3, f"Day-by-Day Peak Curve: {clean_param_name(comp_param)}", xaxis_title="Day of the Month", legend_orientation="v")
@@ -982,6 +998,8 @@ with t4:
                 p_v, p_d, p_t = df_p.iloc[0]['value'], df_p.iloc[0]['nepali_day'], df_p.iloc[0]['time_interval']
                 if i == 0: base_v = p_v
                 metrics4.append({"Month": f"BASE: {ym_str}" if i == 0 else ym_str, "Peak (MW)": p_v, "Day": p_d, "Time": p_t, "Delta (MW)": (p_v - base_v) if base_v else 0, "Var (%)": ((p_v - base_v) / base_v * 100) if base_v else 0})
+                del df_p
+                gc.collect()
 
         if metrics4:
             df_m4 = pd.DataFrame(metrics4)
