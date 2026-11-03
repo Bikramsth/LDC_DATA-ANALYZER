@@ -212,15 +212,12 @@ def extract_data(df, year, month, day, cursor):
         nea = abs(params.get('SUMMARY_TOTAL_NEA_SUBS', 0.0))
         ror = abs(params.get('SUMMARY_TOTAL_ROR', 0.0))
         storage = abs(params.get('SUMMARY_TOTAL_STORAGE', 0.0))
-        
-        # 🚀 EXACT LOGIC RETAINED: Import uses raw sign
         imp = params.get('SUMMARY_TOTAL_IMPORT', 0.0)
 
         interruption = sum(abs(v) for k, v in params.items() if 'INTERRUPT' in k.upper() or 'TRIP' in k.upper())
 
         sys_actual = storage + ror + nea + ipp + abs(imp) + interruption
         
-        # 🚀 EXACT MATH RETAINED: Total National Load (Actual) = Total System Load (Actual) + Total Import (IF negative)
         if imp < 0:
             nat_actual = sys_actual + imp
         else:
@@ -738,7 +735,7 @@ with t1:
                     if col not in df_piv.columns: 
                         df_piv[col] = 0.0
                     else:
-                        # 🚀 PRESERVE SIGN FOR EXACT MATH AND MAIN TAB PLOTTING
+                        # 🚀 PRESERVE RAW SIGN FOR IMPORT (CRITICAL FOR UI MATH)
                         if col != 'SUMMARY_TOTAL_IMPORT':
                             df_piv[col] = df_piv[col].abs()
 
@@ -747,10 +744,13 @@ with t1:
                 # 🚀 CORE MATH CONDITIONS APPLIED TO UI
                 df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = df_piv[['SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE']].sum(axis=1) + df_piv['Net Import/Export'].abs() + df_piv['COMBINED_INTERRUPTION']
                 
+                # 🚀 TOTAL NATIONAL LOAD = TOTAL SYSTEM LOAD + TOTAL IMPORT (ONLY IF TOTAL IMPORT IS NEGATIVE)
                 df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = df_piv.apply(lambda row: row['TOTAL SYSTEM LOAD (ACTUAL)'] + row['SUMMARY_TOTAL_IMPORT'] if row['SUMMARY_TOTAL_IMPORT'] < 0 else row['TOTAL SYSTEM LOAD (ACTUAL)'], axis=1)
 
                 supply_cols = ['SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'Net Import/Export']
-                val_comps = [col for col in supply_cols if df_piv[col].abs().sum() > 0 or 'STORAGE' in col]
+                
+                # 🚀 FORCE 'Net Import/Export' INCLUSION EVEN IF SUM IS 0
+                val_comps = [col for col in supply_cols if df_piv[col].abs().sum() > 0 or 'STORAGE' in col or 'Import' in col]
 
                 sys_act_peak_hour, sys_act_peak_val = df_piv['TOTAL SYSTEM LOAD (ACTUAL)'].idxmax(), df_piv['TOTAL SYSTEM LOAD (ACTUAL)'].max()
                 nat_act_peak_hour, nat_act_peak_val = df_piv['TOTAL NATIONAL LOAD (ACTUAL)'].idxmax(), df_piv['TOTAL NATIONAL LOAD (ACTUAL)'].max()
@@ -772,15 +772,13 @@ with t1:
                 fig_main = go.Figure()
                 NEA_PALETTE_MAIN = ['#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd', '#8c564b', '#e377c2']
                 
-                # 🚀 MAIN SYSTEM TAB CHART: Perfect Negative & Positive splitting for Net Trade
                 for i, col in enumerate(val_comps):
                     if col == 'Net Import/Export':
                         pos_vals = df_piv[col].clip(lower=0)
                         neg_vals = df_piv[col].clip(upper=0)
-                        if pos_vals.sum() > 0:
-                            fig_main.add_trace(go.Scatter(x=df_piv.index, y=pos_vals, name='Net Import', stackgroup='supply_stack', line=dict(width=0.5, color=NEA_PALETTE_MAIN[i % len(NEA_PALETTE_MAIN)]), hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'))
-                        if neg_vals.sum() < 0:
-                            fig_main.add_trace(go.Scatter(x=df_piv.index, y=neg_vals, name='Net Export', stackgroup='export_stack', line=dict(width=0.5, color='#d62728'), hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'))
+                        # 🚀 BOTH TRACES ADDED UNCONDITIONALLY TO PRESERVE LEGEND VISIBILITY
+                        fig_main.add_trace(go.Scatter(x=df_piv.index, y=pos_vals, name='Net Import', stackgroup='supply_stack', line=dict(width=0.5, color=NEA_PALETTE_MAIN[i % len(NEA_PALETTE_MAIN)]), hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'))
+                        fig_main.add_trace(go.Scatter(x=df_piv.index, y=neg_vals, name='Net Export', stackgroup='export_stack', line=dict(width=0.5, color='#d62728'), hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'))
                     else:
                         fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv[col], name=clean_param_name(col), stackgroup='supply_stack', line=dict(width=0.5, color=NEA_PALETTE_MAIN[i % len(NEA_PALETTE_MAIN)]), hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'))
                 
