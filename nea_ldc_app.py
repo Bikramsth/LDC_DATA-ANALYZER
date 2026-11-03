@@ -752,9 +752,19 @@ with t1:
                 
                 st.markdown("<br>", unsafe_allow_html=True)
                 fig_main = go.Figure()
+                NEA_PALETTE_MAIN = ['#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd', '#8c564b', '#e377c2']
                 
+                # 🚀 MAIN SYSTEM TAB: Handle plotting split for Net Import/Export perfectly onto positive/negative axes
                 for i, col in enumerate(val_comps):
-                    fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv[col], name=clean_param_name(col), stackgroup='supply_stack', line=dict(width=0.5, color=NEA_PALETTE[i % len(NEA_PALETTE)]), hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'))
+                    if col == 'Net Import/Export':
+                        pos_vals = df_piv[col].clip(lower=0)
+                        neg_vals = df_piv[col].clip(upper=0)
+                        if pos_vals.sum() > 0:
+                            fig_main.add_trace(go.Scatter(x=df_piv.index, y=pos_vals, name='Net Import', stackgroup='supply_stack', line=dict(width=0.5, color=NEA_PALETTE_MAIN[i % len(NEA_PALETTE_MAIN)]), hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'))
+                        if neg_vals.abs().sum() > 0:
+                            fig_main.add_trace(go.Scatter(x=df_piv.index, y=neg_vals, name='Net Export', stackgroup='export_stack', line=dict(width=0.5, color='#d62728'), hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'))
+                    else:
+                        fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv[col], name=clean_param_name(col), stackgroup='supply_stack', line=dict(width=0.5, color=NEA_PALETTE_MAIN[i % len(NEA_PALETTE_MAIN)]), hovertemplate='<b>%{fullData.name}</b>: %{y:.2f} MW<extra></extra>'))
                 
                 fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv['TOTAL SYSTEM LOAD (ACTUAL)'], name='TOTAL SYSTEM LOAD (ACTUAL)', line=dict(color='#ff3366', width=2.5, dash='dot')))
                 fig_main.add_trace(go.Scatter(x=df_piv.index, y=df_piv['TOTAL NATIONAL LOAD (ACTUAL)'], name='TOTAL NATIONAL LOAD (ACTUAL)', line=dict(color='#1e1e1e', width=3)))
@@ -803,7 +813,7 @@ with t1:
                     st.info(f"No {title} data found.")
 
             with st2:
-                # 🚀 IMPORT TAB: Raw values exactly as in Excel, NO split signs, NO noise filter
+                # 🚀 TOTAL IMPORT TAB: Plots raw negative and positive signs dynamically without enforcing anything.
                 render_sub('ZONE_IMPORT_', 'Dynamic Breakdown: Import (Raw Excel Values)', enable_plant_filter=False, use_abs=False, stack=False, split_signs=False, noise_filter=0.0)
             with st3:
                 render_sub('ZONE_NEASUB_', 'Dynamic Breakdown: NEA Subsidiaries', enable_plant_filter=False, use_abs=True, stack=True)
