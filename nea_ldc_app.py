@@ -217,12 +217,8 @@ def extract_data(df, year, month, day, cursor):
         ror = abs(params.get('SUMMARY_TOTAL_ROR', 0.0))
         storage = abs(params.get('SUMMARY_TOTAL_STORAGE', 0.0))
         
-        if 'ZONE_IMPORT_TOTAL' in params and abs(params['ZONE_IMPORT_TOTAL']) > 0:
-            imp_total = params['ZONE_IMPORT_TOTAL']
-        elif 'SUMMARY_TOTAL_IMPORT' in params and abs(params['SUMMARY_TOTAL_IMPORT']) > 0:
-            imp_total = params['SUMMARY_TOTAL_IMPORT']
-        else:
-            imp_total = sum(v for k, v in params.items() if str(k).startswith('ZONE_IMPORT_') and 'TOTAL' not in str(k).upper())
+        # 🚀 Sum ZONE_IMPORT_ lines to guarantee we catch the -600 MW Export values
+        imp_total = sum(v for k, v in params.items() if str(k).startswith('ZONE_IMPORT_'))
 
         interruption = sum(abs(v) for k, v in params.items() if 'INTERRUPT' in k.upper() or 'TRIP' in k.upper())
 
@@ -230,10 +226,10 @@ def extract_data(df, year, month, day, cursor):
         import_only = imp_total if imp_total > 0 else 0.0
         export_only = abs(imp_total) if imp_total < 0 else 0.0
 
-        # 🚀 EXACT MATH: System Load = Storage + ROR + NEA + IPP + Import Only + Interruption
+        # 🚀 EXACT MATH: Total System Load (Actual) = Storage + ROR + NEA + IPP + Import Only + Interruption
         sys_actual = storage + ror + nea + ipp + import_only + interruption
         
-        # 🚀 EXACT MATH: National Load = System Load - Total Export
+        # 🚀 EXACT MATH: Total National Load (Actual) = System Load - Total Export
         nat_actual = sys_actual - export_only
 
         params['TOTAL SYSTEM LOAD (ACTUAL)'] = sys_actual
@@ -375,7 +371,6 @@ def categorize_params(param_list):
 def clean_param_name(p):
     return p.replace('SUMMARY_TOTAL_IPP', 'Total IPP').replace('SUMMARY_TOTAL_NEA_SUBS', 'Total NEA Subsidiaries').replace('SUMMARY_TOTAL_ROR', 'Total ROR').replace('SUMMARY_TOTAL_STORAGE', 'Total Storage').replace('SUMMARY_TOTAL_IMPORT', 'Total IMPORT').replace('SUMMARY_TOTAL_EXPORT', 'Total EXPORT').replace('COMBINED_INTERRUPTION', 'Interruption / Tripping').replace('ZONE_IPP_', 'IPP: ').replace('ZONE_ROR_', 'ROR: ').replace('ZONE_STORAGE_', 'STORAGE: ').replace('ZONE_NEASUB_', 'SUB: ').replace('ZONE_IMPORT_', 'IMPORT: ').replace('ZONE_EXPORT_', 'EXPORT: ')
 
-@st.cache_data(show_spinner=False, max_entries=2)
 def convert_df(df): 
     return df.to_csv(index=False).encode('utf-8')
 
@@ -431,8 +426,9 @@ def draw_stacked_chart(df_pivot, cols, title, total_col=None, show_export=False,
         fig.add_hline(y=0, line_width=1.5, line_color="#1e1e1e", opacity=0.8)
         
     st.plotly_chart(fig, use_container_width=True)
+    del fig
+    gc.collect()
 
-@st.cache_data(show_spinner=False, max_entries=2)
 def generate_nea_excel_report(df_piv, df_all, date_str, metrics_dict, val_comps):
     output = io.BytesIO()
     num_intervals = len(df_piv)
@@ -745,6 +741,7 @@ with t1:
                 df_piv = df_all[df_all['parameter_name'].isin(req_p)].pivot(index='Time', columns='parameter_name', values='MW').fillna(0.0).sort_index()
                 
                 df_import = df_all[df_all['parameter_name'].str.startswith('ZONE_IMPORT_')].pivot(index='Time', columns='parameter_name', values='MW').fillna(0.0)
+                
                 if 'ZONE_IMPORT_TOTAL' in df_import.columns and df_import['ZONE_IMPORT_TOTAL'].abs().sum() > 0:
                     df_piv['Net Import/Export'] = df_import['ZONE_IMPORT_TOTAL']
                 elif 'SUMMARY_TOTAL_IMPORT' in df_all['parameter_name'].values:
@@ -763,6 +760,7 @@ with t1:
                     else:
                         df_piv[col] = df_piv[col].abs()
 
+                # 🚀 EXACT MATH: Total System Load (Actual) = Storage + ROR + NEA + IPP + Import Only + Interruption
                 df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = (
                     df_piv['SUMMARY_TOTAL_IPP'] + 
                     df_piv['SUMMARY_TOTAL_NEA_SUBS'] + 
@@ -772,6 +770,7 @@ with t1:
                     df_piv['COMBINED_INTERRUPTION']
                 )
                 
+                # 🚀 EXACT MATH: Total National Load (Actual) = System Load - abs(Export)
                 df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = (
                     df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] - df_piv['Net Import/Export'].clip(upper=0).abs()
                 )
@@ -817,6 +816,8 @@ with t1:
                 fig_main = update_chart_layout(fig_main, "System Operation & Load Curve", legend_orientation="v")
                 fig_main.add_hline(y=0, line_width=2, line_color="#1e1e1e")
                 st.plotly_chart(fig_main, use_container_width=True)
+                del fig_main
+                gc.collect()
 
                 with st.expander("🔍 View Filtered Supply Components & Loads"):
                     display_cols = ['TOTAL SYSTEM LOAD (ACTUAL)', 'TOTAL NATIONAL LOAD (ACTUAL)'] + val_comps + ['COMBINED_INTERRUPTION']
