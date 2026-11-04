@@ -213,19 +213,19 @@ def extract_data(df, year, month, day, cursor):
         ror = abs(params.get('SUMMARY_TOTAL_ROR', 0.0))
         storage = abs(params.get('SUMMARY_TOTAL_STORAGE', 0.0))
         
-        # Fetch directly from 'SUMMARY_TOTAL_IMPORT' to perfectly match the Excel sheet's row
-        imp = params.get('SUMMARY_TOTAL_IMPORT', 0.0)
-        
-        # 🚀 NEW MATH: Exact definition of export (negative values only, no abs)
-        total_export = imp if imp < 0 else 0.0
+        # 🚀 REVERTED to flawlessly fetch the total value directly from the Import tab
+        imp_total = sum(v for k, v in params.items() if str(k).startswith('ZONE_IMPORT_'))
 
         interruption = sum(abs(v) for k, v in params.items() if 'INTERRUPT' in k.upper() or 'TRIP' in k.upper())
 
-        # TOTAL SYSTEM LOAD (ACTUAL)
-        sys_actual = storage + ror + nea + ipp + abs(imp) + interruption
+        # 🚀 TOTAL SYSTEM LOAD (ACTUAL) = Storage + ROR + NEA + IPP + abs(Total Import tab value) + Interruption
+        sys_actual = storage + ror + nea + ipp + abs(imp_total) + interruption
         
-        # 🚀 TOTAL NATIONAL LOAD (ACTUAL) = System Load + Total Export (where export is the negative import value)
-        nat_actual = sys_actual + total_export
+        # 🚀 EXACT MATH: Total National Load (Actual) = Total System Load (Actual) + Total Export from Import tab (no Abs)
+        if imp_total < 0:
+            nat_actual = sys_actual + imp_total
+        else:
+            nat_actual = sys_actual
 
         params['TOTAL SYSTEM LOAD (ACTUAL)'] = sys_actual
         params['TOTAL NATIONAL LOAD (ACTUAL)'] = nat_actual
@@ -732,8 +732,8 @@ with t1:
         
         if not df_all.empty:
             with st1:
-                # 🚀 DYNAMIC RECALCULATION: Guarantees correct math for all historical DB records
-                req_p = ['SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'SUMMARY_TOTAL_IMPORT', 'COMBINED_INTERRUPTION']
+                # 🚀 DYNAMIC UI RECALCULATION: Mirrors the DB extraction engine perfectly
+                req_p = ['SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'COMBINED_INTERRUPTION']
                 df_piv = df_all[df_all['parameter_name'].isin(req_p)].pivot(index='Time', columns='parameter_name', values='MW').fillna(0.0).sort_index()
                 
                 df_import = df_all[df_all['parameter_name'].str.startswith('ZONE_IMPORT_')].pivot(index='Time', columns='parameter_name', values='MW').fillna(0.0)
@@ -746,8 +746,7 @@ with t1:
                     if col not in df_piv.columns: 
                         df_piv[col] = 0.0
                     else:
-                        if col != 'SUMMARY_TOTAL_IMPORT':
-                            df_piv[col] = df_piv[col].abs()
+                        df_piv[col] = df_piv[col].abs()
 
                 # 🚀 TOTAL SYSTEM LOAD (ACTUAL) = Storage + ROR + NEA + IPP + abs(Total Import) + Interruption
                 df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = (
@@ -759,8 +758,10 @@ with t1:
                     df_piv['COMBINED_INTERRUPTION']
                 )
                 
-                # 🚀 TOTAL NATIONAL LOAD (ACTUAL) = System Load + Total Import (ONLY if Total Import is negative)
-                df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] + df_piv['Net Import/Export'].clip(upper=0)
+                # 🚀 EXACT MATH: Total National Load (Actual) = Total System Load (Actual) + Total Export from Import tab (no Abs)
+                df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = df_piv.apply(
+                    lambda row: row['TOTAL SYSTEM LOAD (ACTUAL)'] + row['Net Import/Export'] if row['Net Import/Export'] < 0 else row['TOTAL SYSTEM LOAD (ACTUAL)'], axis=1
+                )
 
                 supply_cols = ['SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'Net Import/Export']
                 val_comps = [col for col in supply_cols if df_piv[col].abs().sum() > 0 or 'STORAGE' in col or 'Import' in col]
@@ -886,7 +887,8 @@ with t2:
             df_piv['Net Import/Export'] = 0.0
             
         df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = df_piv['SUMMARY_TOTAL_IPP'] + df_piv['SUMMARY_TOTAL_NEA_SUBS'] + df_piv['SUMMARY_TOTAL_ROR'] + df_piv['SUMMARY_TOTAL_STORAGE'] + df_piv['Net Import/Export'].abs() + df_piv['COMBINED_INTERRUPTION']
-        df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] + df_piv['Net Import/Export'].clip(upper=0)
+        
+        df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = df_piv.apply(lambda row: row['TOTAL SYSTEM LOAD (ACTUAL)'] + row['Net Import/Export'] if row['Net Import/Export'] < 0 else row['TOTAL SYSTEM LOAD (ACTUAL)'], axis=1)
 
         sys_d = df_piv.loc[df_piv.groupby('nepali_day')['TOTAL SYSTEM LOAD (ACTUAL)'].idxmax(), ['nepali_day', 'time_interval', 'TOTAL SYSTEM LOAD (ACTUAL)']].rename(columns={'TOTAL SYSTEM LOAD (ACTUAL)': 'Peak_MW'}).assign(**{'Load Type': 'System Peak Load'})
         nat_d = df_piv.loc[df_piv.groupby('nepali_day')['TOTAL NATIONAL LOAD (ACTUAL)'].idxmax(), ['nepali_day', 'time_interval', 'TOTAL NATIONAL LOAD (ACTUAL)']].rename(columns={'TOTAL NATIONAL LOAD (ACTUAL)': 'Peak_MW'}).assign(**{'Load Type': 'National Peak Load'})
@@ -923,7 +925,8 @@ with t3:
             df_piv['Net Import/Export'] = 0.0
             
         df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = df_piv['SUMMARY_TOTAL_IPP'] + df_piv['SUMMARY_TOTAL_NEA_SUBS'] + df_piv['SUMMARY_TOTAL_ROR'] + df_piv['SUMMARY_TOTAL_STORAGE'] + df_piv['Net Import/Export'].abs() + df_piv['COMBINED_INTERRUPTION']
-        df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] + df_piv['Net Import/Export'].clip(upper=0)
+        
+        df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = df_piv.apply(lambda row: row['TOTAL SYSTEM LOAD (ACTUAL)'] + row['Net Import/Export'] if row['Net Import/Export'] < 0 else row['TOTAL SYSTEM LOAD (ACTUAL)'], axis=1)
 
         s_d = df_piv.loc[df_piv.groupby(['nepali_year', 'nepali_month'])['TOTAL SYSTEM LOAD (ACTUAL)'].idxmax(), ['nepali_year', 'nepali_month', 'nepali_day', 'time_interval', 'TOTAL SYSTEM LOAD (ACTUAL)']].rename(columns={'TOTAL SYSTEM LOAD (ACTUAL)': 'Peak_MW'}).assign(**{'Load Type': 'System Peak Load'})
         n_d = df_piv.loc[df_piv.groupby(['nepali_year', 'nepali_month'])['TOTAL NATIONAL LOAD (ACTUAL)'].idxmax(), ['nepali_year', 'nepali_month', 'nepali_day', 'time_interval', 'TOTAL NATIONAL LOAD (ACTUAL)']].rename(columns={'TOTAL NATIONAL LOAD (ACTUAL)': 'Peak_MW'}).assign(**{'Load Type': 'National Peak Load'})
