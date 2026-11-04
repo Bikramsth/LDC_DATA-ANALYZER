@@ -217,19 +217,21 @@ def extract_data(df, year, month, day, cursor):
         ror = abs(params.get('SUMMARY_TOTAL_ROR', 0.0))
         storage = abs(params.get('SUMMARY_TOTAL_STORAGE', 0.0))
         
-        # 🚀 Sum ZONE_IMPORT_ lines to guarantee we catch the -600 MW Export values
-        imp_total = sum(v for k, v in params.items() if str(k).startswith('ZONE_IMPORT_'))
+        # 🚀 FORCED FALLBACK: Sum the exact tie lines if the summary row is 0.0
+        imp_lines = [v for k, v in params.items() if str(k).startswith('ZONE_IMPORT_') and 'TOTAL' not in str(k).upper()]
+        if sum(abs(v) for v in imp_lines) > 0:
+            imp_total = sum(imp_lines)
+        elif 'SUMMARY_TOTAL_IMPORT' in params and abs(params['SUMMARY_TOTAL_IMPORT']) > 0:
+            imp_total = params['SUMMARY_TOTAL_IMPORT']
+        else:
+            imp_total = 0.0
 
         interruption = sum(abs(v) for k, v in params.items() if 'INTERRUPT' in k.upper() or 'TRIP' in k.upper())
 
-        # 🚀 ISOLATE IMPORT VS EXPORT VALUES
         import_only = imp_total if imp_total > 0 else 0.0
         export_only = abs(imp_total) if imp_total < 0 else 0.0
 
-        # 🚀 EXACT MATH: Total System Load (Actual) = Storage + ROR + NEA + IPP + Import Only + Interruption
         sys_actual = storage + ror + nea + ipp + import_only + interruption
-        
-        # 🚀 EXACT MATH: Total National Load (Actual) = System Load - Total Export
         nat_actual = sys_actual - export_only
 
         params['TOTAL SYSTEM LOAD (ACTUAL)'] = sys_actual
@@ -742,17 +744,16 @@ with t1:
                 
                 df_import = df_all[df_all['parameter_name'].str.startswith('ZONE_IMPORT_')].pivot(index='Time', columns='parameter_name', values='MW').fillna(0.0)
                 
-                if 'ZONE_IMPORT_TOTAL' in df_import.columns and df_import['ZONE_IMPORT_TOTAL'].abs().sum() > 0:
-                    df_piv['Net Import/Export'] = df_import['ZONE_IMPORT_TOTAL']
+                imp_cols = [c for c in df_import.columns if 'TOTAL' not in c.upper()]
+                if imp_cols and df_import[imp_cols].abs().sum().sum() > 0:
+                    df_piv['Net Import/Export'] = df_import[imp_cols].sum(axis=1)
                 elif 'SUMMARY_TOTAL_IMPORT' in df_all['parameter_name'].values:
                     df_sum = df_all[df_all['parameter_name'] == 'SUMMARY_TOTAL_IMPORT'].pivot(index='Time', columns='parameter_name', values='MW').fillna(0.0)
                     df_piv['Net Import/Export'] = df_sum['SUMMARY_TOTAL_IMPORT']
                 else:
-                    imp_cols = [c for c in df_import.columns if 'TOTAL' not in c.upper()]
-                    if imp_cols:
-                        df_piv['Net Import/Export'] = df_import[imp_cols].sum(axis=1)
-                    else:
-                        df_piv['Net Import/Export'] = 0.0
+                    df_piv['Net Import/Export'] = 0.0
+                    
+                df_piv['Net Import/Export'] = df_piv['Net Import/Export'].fillna(0.0)
 
                 for col in req_p:
                     if col not in df_piv.columns: 
@@ -760,7 +761,6 @@ with t1:
                     else:
                         df_piv[col] = df_piv[col].abs()
 
-                # 🚀 EXACT MATH: Total System Load (Actual) = Storage + ROR + NEA + IPP + Import Only + Interruption
                 df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = (
                     df_piv['SUMMARY_TOTAL_IPP'] + 
                     df_piv['SUMMARY_TOTAL_NEA_SUBS'] + 
@@ -770,7 +770,6 @@ with t1:
                     df_piv['COMBINED_INTERRUPTION']
                 )
                 
-                # 🚀 EXACT MATH: Total National Load (Actual) = System Load - abs(Export)
                 df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = (
                     df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] - df_piv['Net Import/Export'].clip(upper=0).abs()
                 )
@@ -893,17 +892,15 @@ with t2:
             if col not in df_piv.columns: df_piv[col] = 0.0
             else: df_piv[col] = df_piv[col].abs()
             
-        import_cols = [c for c in df_piv.columns if c.startswith('ZONE_IMPORT_')]
-        if 'ZONE_IMPORT_TOTAL' in df_piv.columns and df_piv['ZONE_IMPORT_TOTAL'].abs().sum() > 0:
-            df_piv['Net Import/Export'] = df_piv['ZONE_IMPORT_TOTAL']
-        elif 'SUMMARY_TOTAL_IMPORT' in df_piv.columns:
+        import_cols = [c for c in df_piv.columns if c.startswith('ZONE_IMPORT_') and 'TOTAL' not in c.upper()]
+        if import_cols and df_piv[import_cols].abs().sum().sum() > 0:
+            df_piv['Net Import/Export'] = df_piv[import_cols].sum(axis=1)
+        elif 'SUMMARY_TOTAL_IMPORT' in df_piv.columns and df_piv['SUMMARY_TOTAL_IMPORT'].abs().sum() > 0:
             df_piv['Net Import/Export'] = df_piv['SUMMARY_TOTAL_IMPORT']
         else:
-            imp_c = [c for c in import_cols if 'TOTAL' not in c.upper()]
-            if imp_c:
-                df_piv['Net Import/Export'] = df_piv[imp_c].sum(axis=1)
-            else:
-                df_piv['Net Import/Export'] = 0.0
+            df_piv['Net Import/Export'] = 0.0
+            
+        df_piv['Net Import/Export'] = df_piv['Net Import/Export'].fillna(0.0)
             
         df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = (
             df_piv['SUMMARY_TOTAL_IPP'] + 
@@ -947,17 +944,15 @@ with t3:
             if col not in df_piv.columns: df_piv[col] = 0.0
             else: df_piv[col] = df_piv[col].abs()
             
-        import_cols = [c for c in df_piv.columns if c.startswith('ZONE_IMPORT_')]
-        if 'ZONE_IMPORT_TOTAL' in df_piv.columns and df_piv['ZONE_IMPORT_TOTAL'].abs().sum() > 0:
-            df_piv['Net Import/Export'] = df_piv['ZONE_IMPORT_TOTAL']
-        elif 'SUMMARY_TOTAL_IMPORT' in df_piv.columns:
+        import_cols = [c for c in df_piv.columns if c.startswith('ZONE_IMPORT_') and 'TOTAL' not in c.upper()]
+        if import_cols and df_piv[import_cols].abs().sum().sum() > 0:
+            df_piv['Net Import/Export'] = df_piv[import_cols].sum(axis=1)
+        elif 'SUMMARY_TOTAL_IMPORT' in df_piv.columns and df_piv['SUMMARY_TOTAL_IMPORT'].abs().sum() > 0:
             df_piv['Net Import/Export'] = df_piv['SUMMARY_TOTAL_IMPORT']
         else:
-            imp_c = [c for c in import_cols if 'TOTAL' not in c.upper()]
-            if imp_c:
-                df_piv['Net Import/Export'] = df_piv[imp_c].sum(axis=1)
-            else:
-                df_piv['Net Import/Export'] = 0.0
+            df_piv['Net Import/Export'] = 0.0
+            
+        df_piv['Net Import/Export'] = df_piv['Net Import/Export'].fillna(0.0)
             
         df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = (
             df_piv['SUMMARY_TOTAL_IPP'] + 
