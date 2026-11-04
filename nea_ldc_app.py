@@ -993,4 +993,55 @@ with t4:
         if metrics2:
             fig_comp2 = update_chart_layout(fig_comp2, "Parameter Overlay Analytics", legend_orientation="v")
             st.plotly_chart(fig_comp2, use_container_width=True)
-            st.dataframe(pd.DataFrame(metrics2).style.format({"Peak (MW)": "{:.2f}", "Delta (MW)": "{
+            st.dataframe(pd.DataFrame(metrics2).style.format({"Peak (MW)": "{:.2f}", "Delta (MW)": "{:+.2f}", "Var (%)": "{:+.2f}%"}), use_container_width=True)
+
+    elif compare_mode == "📅 Daily Peak/Load Across Months" and comp_param and selected_comp_months:
+        st.subheader("📊 Overlay: Daily Peak Trends Across Months")
+        fig_comp3, metrics3 = go.Figure(), []
+        base_v = None
+
+        for i, ym_str in enumerate(selected_comp_months):
+            y, m = map(int, ym_str.split('/'))
+            df_m = run_query("SELECT nepali_day, time_interval, value FROM system_log_data WHERE parameter_name = ? AND nepali_year = ? AND nepali_month = ? AND nepali_day > 0", (comp_param, y, m))
+            if not df_m.empty:
+                df_m['value'] = pd.to_numeric(df_m['value'], errors='coerce').fillna(0.0).abs()
+                df_peaks = df_m.loc[df_m.groupby('nepali_day')['value'].idxmax()].sort_values('nepali_day')
+                l_name, l_dict = (f"BASE: {ym_str}", dict(width=3, color='#1e1e1e')) if i == 0 else (ym_str, dict(dash='dot', color=NEA_PALETTE[i % len(NEA_PALETTE)]))
+                fig_comp3.add_trace(go.Scatter(x=df_peaks['nepali_day'], y=df_peaks['value'], name=l_name, mode='lines+markers', line=l_dict, customdata=df_peaks['time_interval'], hovertemplate='Day %{x}<br>Peak: %{y:.2f} MW<br>Time: %{customdata}<extra></extra>'))
+                m_peak = df_peaks['value'].max()
+                if i == 0: base_v = m_peak
+                metrics3.append({"Month": l_name, "Abs Peak": m_peak, "Avg Peak": df_peaks['value'].mean(), "Delta": (m_peak - base_v) if base_v else 0, "Var (%)": ((m_peak - base_v) / base_v * 100) if base_v else 0})
+                del df_m
+                gc.collect()
+
+        if metrics3:
+            fig_comp3 = update_chart_layout(fig_comp3, f"Day-by-Day Peak Curve: {clean_param_name(comp_param)}", xaxis_title="Day of the Month", legend_orientation="v")
+            fig_comp3.update_layout(xaxis=dict(tickmode='linear', tick0=1, dtick=1, range=[0.8, 32.2]))
+            st.plotly_chart(fig_comp3, use_container_width=True)
+            st.dataframe(pd.DataFrame(metrics3).style.format({"Abs Peak": "{:.2f}", "Avg Peak": "{:.2f}", "Delta": "{:+.2f}", "Var (%)": "{:+.2f}%"}), use_container_width=True)
+
+    elif compare_mode == "📊 Monthly Peak/Load" and comp_param and selected_comp_months:
+        st.subheader("📊 Macro-Trend: Absolute Peak Comparison")
+        metrics4 = []
+        base_v = None
+
+        for i, ym_str in enumerate(selected_comp_months):
+            y, m = map(int, ym_str.split('/'))
+            df_p = run_query("SELECT nepali_day, time_interval, value FROM system_log_data WHERE parameter_name = ? AND nepali_year = ? AND nepali_month = ? AND nepali_day > 0", (comp_param, y, m))
+            if not df_p.empty:
+                df_p['value'] = pd.to_numeric(df_p['value'], errors='coerce').fillna(0.0).abs()
+                df_p = df_p.sort_values(by='value', ascending=False).head(1)
+                p_v, p_d, p_t = df_p.iloc[0]['value'], df_p.iloc[0]['nepali_day'], df_p.iloc[0]['time_interval']
+                if i == 0: base_v = p_v
+                metrics4.append({"Month": f"BASE: {ym_str}" if i == 0 else ym_str, "Peak (MW)": p_v, "Day": p_d, "Time": p_t, "Delta (MW)": (p_v - base_v) if base_v else 0, "Var (%)": ((p_v - base_v) / base_v * 100) if base_v else 0})
+                del df_p
+                gc.collect()
+
+        if metrics4:
+            df_m4 = pd.DataFrame(metrics4)
+            fig_bar = px.bar(df_m4, x="Month", y="Peak (MW)", text="Peak (MW)", color="Month", title=f"Absolute Monthly Peaks: {clean_param_name(comp_param)}", color_discrete_sequence=['#0052cc', '#33b2df', '#ff3366', '#fdbb2d'])
+            fig_bar.update_traces(texttemplate='%{text:.2f} MW', textposition='outside')
+            fig_bar = update_chart_layout(fig_bar, f"Absolute Monthly Peaks: {clean_param_name(comp_param)}", xaxis_title="")
+            fig_bar.update_layout(showlegend=False, yaxis=dict(range=[0, df_m4['Peak (MW)'].max() * 1.15]))
+            st.plotly_chart(fig_bar, use_container_width=True)
+            st.dataframe(df_m4.style.format({"Peak (MW)": "{:.2f}", "Delta (MW)": "{:+.2f}", "Var (%)": "{:+.2f}%"}), use_container_width=True)
