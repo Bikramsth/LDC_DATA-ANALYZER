@@ -95,6 +95,10 @@ def run_query(query, params=()):
     conn = sqlite3.connect(DATABASE_NAME, timeout=30.0)
     df = pd.read_sql_query(query, conn, params=params)
     conn.close()
+    
+    for col in df.select_dtypes(include=['float64']).columns:
+        df[col] = pd.to_numeric(df[col], downcast='float')
+        
     return df
 
 def backup_database():
@@ -213,17 +217,21 @@ def extract_data(df, year, month, day, cursor):
         ror = abs(params.get('SUMMARY_TOTAL_ROR', 0.0))
         storage = abs(params.get('SUMMARY_TOTAL_STORAGE', 0.0))
         
-        # 🚀 Sum ZONE_IMPORT_ lines to guarantee we catch the -600 MW Export values
-        imp_total = sum(v for k, v in params.items() if str(k).startswith('ZONE_IMPORT_'))
+        if 'ZONE_IMPORT_TOTAL' in params and abs(params['ZONE_IMPORT_TOTAL']) > 0:
+            imp_total = params['ZONE_IMPORT_TOTAL']
+        elif 'SUMMARY_TOTAL_IMPORT' in params and abs(params['SUMMARY_TOTAL_IMPORT']) > 0:
+            imp_total = params['SUMMARY_TOTAL_IMPORT']
+        else:
+            imp_total = sum(v for k, v in params.items() if str(k).startswith('ZONE_IMPORT_') and 'TOTAL' not in str(k).upper())
 
         interruption = sum(abs(v) for k, v in params.items() if 'INTERRUPT' in k.upper() or 'TRIP' in k.upper())
 
-        # 🚀 EXACT MATH: Total System Load (Actual) = Storage + ROR + NEA + IPP + abs(Total Import tab value) + Interruption
+        # 🚀 EXACT MATH: Total System Load (Actual) = Total Storage + Total ROR + total NEA Subsidary + totsl IPP + abs(Total Import) + Interruption
         sys_actual = storage + ror + nea + ipp + abs(imp_total) + interruption
         
-        # 🚀 EXACT MATH: Total National Load (Actual) = System Load + Total Import (ONLY if Total Import is negative)
+        # 🚀 EXACT MATH: Total National Load (Actual) = System Load - Total Export
         if imp_total < 0:
-            nat_actual = sys_actual + imp_total
+            nat_actual = sys_actual - imp_total
         else:
             nat_actual = sys_actual
 
@@ -360,13 +368,12 @@ def categorize_params(param_list):
         elif p_up.startswith('ZONE_EXPORT_'): cat = "⬆️ Export"
         elif 'SUMMARY' in p_up or 'TOTAL' in p_up or 'LOAD' in p_up or 'INTERRUPTION' in p_up: cat = "📊 System Totals"
         else: cat = "📁 Other"
-        categories.setdefault(cat, []).append(p)
+        categories.setdefault(cat, []append(p)
     return categories
 
 def clean_param_name(p):
     return p.replace('SUMMARY_TOTAL_IPP', 'Total IPP').replace('SUMMARY_TOTAL_NEA_SUBS', 'Total NEA Subsidiaries').replace('SUMMARY_TOTAL_ROR', 'Total ROR').replace('SUMMARY_TOTAL_STORAGE', 'Total Storage').replace('SUMMARY_TOTAL_IMPORT', 'Total IMPORT').replace('SUMMARY_TOTAL_EXPORT', 'Total EXPORT').replace('COMBINED_INTERRUPTION', 'Interruption / Tripping').replace('ZONE_IPP_', 'IPP: ').replace('ZONE_ROR_', 'ROR: ').replace('ZONE_STORAGE_', 'STORAGE: ').replace('ZONE_NEASUB_', 'SUB: ').replace('ZONE_IMPORT_', 'IMPORT: ').replace('ZONE_EXPORT_', 'EXPORT: ')
 
-@st.cache_data(show_spinner=False, max_entries=2)
 def convert_df(df): 
     return df.to_csv(index=False).encode('utf-8')
 
@@ -422,8 +429,9 @@ def draw_stacked_chart(df_pivot, cols, title, total_col=None, show_export=False,
         fig.add_hline(y=0, line_width=1.5, line_color="#1e1e1e", opacity=0.8)
         
     st.plotly_chart(fig, use_container_width=True)
+    del fig
+    gc.collect()
 
-@st.cache_data(show_spinner=False, max_entries=2)
 def generate_nea_excel_report(df_piv, df_all, date_str, metrics_dict, val_comps):
     output = io.BytesIO()
     num_intervals = len(df_piv)
@@ -732,10 +740,10 @@ with t1:
         
         if not df_all.empty:
             with st1:
+                # 🚀 DYNAMIC RECALCULATION: Guarantees correct math for all historical DB records
                 req_p = ['SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'COMBINED_INTERRUPTION']
                 df_piv = df_all[df_all['parameter_name'].isin(req_p)].pivot(index='Time', columns='parameter_name', values='MW').fillna(0.0).sort_index()
                 
-                # 🚀 DYNAMIC IMPORT: Fetches exactly the 'TOTAL' value from the 'Total Import' tab by summing ZONE_IMPORT_
                 df_import = df_all[df_all['parameter_name'].str.startswith('ZONE_IMPORT_')].pivot(index='Time', columns='parameter_name', values='MW').fillna(0.0)
                 if not df_import.empty:
                     df_piv['Net Import/Export'] = df_import.sum(axis=1)
@@ -752,7 +760,7 @@ with t1:
                     else:
                         df_piv[col] = df_piv[col].abs()
 
-                # 🚀 EXACT MATH: Total System Load (Actual) = Storage + ROR + NEA + IPP + abs(Total Import) + Interruption
+                # 🚀 TOTAL SYSTEM LOAD (ACTUAL) = Storage + ROR + NEA + IPP + abs(Total Import) + Interruption
                 df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = (
                     df_piv['SUMMARY_TOTAL_IPP'] + 
                     df_piv['SUMMARY_TOTAL_NEA_SUBS'] + 
@@ -762,13 +770,13 @@ with t1:
                     df_piv['COMBINED_INTERRUPTION']
                 )
                 
-                # 🚀 EXACT MATH: Total National Load (Actual) = System Load + Total Import (ONLY if negative)
+                # 🚀 EXACT MATH: Total National Load (Actual) = System Load - Total Export
                 df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = df_piv.apply(
-                    lambda row: row['TOTAL SYSTEM LOAD (ACTUAL)'] + row['Net Import/Export'] if row['Net Import/Export'] < 0 else row['TOTAL SYSTEM LOAD (ACTUAL)'], axis=1
+                    lambda row: row['TOTAL SYSTEM LOAD (ACTUAL)'] - row['Net Import/Export'] if row['Net Import/Export'] < 0 else row['TOTAL SYSTEM LOAD (ACTUAL)'], axis=1
                 )
 
                 supply_cols = ['SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'Net Import/Export']
-                val_comps = [col for col in supply_cols if df_piv[col].abs().sum() > 0 or 'STORAGE' in col or 'Import' in col or 'Export' in col]
+                val_comps = [col for col in supply_cols if df_piv[col].abs().sum() > 0 or 'STORAGE' in col or 'Import' in col]
 
                 sys_act_peak_hour, sys_act_peak_val = df_piv['TOTAL SYSTEM LOAD (ACTUAL)'].idxmax(), df_piv['TOTAL SYSTEM LOAD (ACTUAL)'].max()
                 nat_act_peak_hour, nat_act_peak_val = df_piv['TOTAL NATIONAL LOAD (ACTUAL)'].idxmax(), df_piv['TOTAL NATIONAL LOAD (ACTUAL)'].max()
@@ -869,6 +877,7 @@ with t1:
 with t2:
     st.subheader(f"📊 Daily Peak Loads for Month {selected_month}, {selected_year}")
     
+    # 🚀 DYNAMIC RECALCULATION FOR TAB 2
     query_monthly = "SELECT nepali_day, time_interval, parameter_name, value FROM system_log_data WHERE nepali_year = ? AND nepali_month = ? AND nepali_day > 0 AND (parameter_name IN ('SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'COMBINED_INTERRUPTION', 'SUMMARY_TOTAL_IMPORT') OR parameter_name LIKE 'ZONE_IMPORT_%')"
     df_raw = run_query(query_monthly, (selected_year, selected_month))
 
@@ -900,8 +909,9 @@ with t2:
             df_piv['COMBINED_INTERRUPTION']
         )
         
+        # 🚀 EXACT MATH: Total National Load (Actual) = System Load - Total Export
         df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = df_piv.apply(
-            lambda row: row['TOTAL SYSTEM LOAD (ACTUAL)'] + row['Net Import/Export'] if row['Net Import/Export'] < 0 else row['TOTAL SYSTEM LOAD (ACTUAL)'], axis=1
+            lambda row: row['TOTAL SYSTEM LOAD (ACTUAL)'] - row['Net Import/Export'] if row['Net Import/Export'] < 0 else row['TOTAL SYSTEM LOAD (ACTUAL)'], axis=1
         )
 
         sys_d = df_piv.loc[df_piv.groupby('nepali_day')['TOTAL SYSTEM LOAD (ACTUAL)'].idxmax(), ['nepali_day', 'time_interval', 'TOTAL SYSTEM LOAD (ACTUAL)']].rename(columns={'TOTAL SYSTEM LOAD (ACTUAL)': 'Peak_MW'}).assign(**{'Load Type': 'System Peak Load'})
@@ -913,10 +923,13 @@ with t2:
         fig_m = update_chart_layout(fig_m, "System vs National Peak Load Each Day", xaxis_title="Day of Month", legend_orientation="v")
         fig_m.update_layout(xaxis=dict(tickmode='linear', tick0=1, dtick=1, range=[0.8, 32.2]))
         st.plotly_chart(fig_m, use_container_width=True)
+        del df_comb, fig_m, sys_d, nat_d, df_piv
+        gc.collect()
 
 with t3:
     st.subheader("📈 Historical Trend: Maximum Load per Month")
     
+    # 🚀 DYNAMIC RECALCULATION FOR TAB 3
     query_historical = "SELECT nepali_year, nepali_month, nepali_day, time_interval, parameter_name, value FROM system_log_data WHERE nepali_day > 0 AND (parameter_name IN ('SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'COMBINED_INTERRUPTION', 'SUMMARY_TOTAL_IMPORT') OR parameter_name LIKE 'ZONE_IMPORT_%')"
     df_raw = run_query(query_historical)
 
@@ -948,8 +961,9 @@ with t3:
             df_piv['COMBINED_INTERRUPTION']
         )
         
+        # 🚀 EXACT MATH: Total National Load (Actual) = System Load - Total Export
         df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = df_piv.apply(
-            lambda row: row['TOTAL SYSTEM LOAD (ACTUAL)'] + row['Net Import/Export'] if row['Net Import/Export'] < 0 else row['TOTAL SYSTEM LOAD (ACTUAL)'], axis=1
+            lambda row: row['TOTAL SYSTEM LOAD (ACTUAL)'] - row['Net Import/Export'] if row['Net Import/Export'] < 0 else row['TOTAL SYSTEM LOAD (ACTUAL)'], axis=1
         )
 
         s_d = df_piv.loc[df_piv.groupby(['nepali_year', 'nepali_month'])['TOTAL SYSTEM LOAD (ACTUAL)'].idxmax(), ['nepali_year', 'nepali_month', 'nepali_day', 'time_interval', 'TOTAL SYSTEM LOAD (ACTUAL)']].rename(columns={'TOTAL SYSTEM LOAD (ACTUAL)': 'Peak_MW'}).assign(**{'Load Type': 'System Peak Load'})
@@ -963,6 +977,8 @@ with t3:
         fig_h.update_traces(hovertemplate='<b>%{fullData.name}</b><br>Month: %{x}<br>Peak Load: %{y:.2f} MW<br>Day: %{customdata[0]}<br>Time: %{customdata[1]}<extra></extra>')
         fig_h = update_chart_layout(fig_h, "System vs National Growth: Monthly Peaks Over Time", xaxis_title="Nepali Year/Month", legend_orientation="v")
         st.plotly_chart(fig_h, use_container_width=True)
+        del df_c, fig_h, s_d, n_d, df_piv
+        gc.collect()
 
 with t4:
     if compare_mode == "🗓️ Date-wise" and comp_param:
@@ -977,6 +993,8 @@ with t4:
             fig_comp.add_trace(go.Scatter(x=df_base['time_interval'], y=df_base['value'], name=f"BASE: {sidebar_date_str}", mode='lines', line=dict(width=3, color='#1e1e1e')))
             base_v = df_base['value'].max()
             metrics.append({"Target Date": f"BASE ({sidebar_date_str})", "Peak (MW)": base_v, "Time": df_base.loc[df_base['value'].idxmax(), 'time_interval'], "Delta (MW)": 0.0, "Var (%)": 0.0})
+            del df_base
+            gc.collect()
 
         for i, d_str in enumerate(selected_comp_days):
             y, m, d = map(int, d_str.split('/'))
@@ -994,6 +1012,8 @@ with t4:
             fig_comp = update_chart_layout(fig_comp, f"Date Comparison: {clean_param_name(comp_param)}", legend_orientation="v")
             st.plotly_chart(fig_comp, use_container_width=True)
             st.dataframe(pd.DataFrame(metrics).style.format({"Peak (MW)": "{:.2f}", "Delta (MW)": "{:+.2f}", "Var (%)": "{:+.2f}%"}), use_container_width=True)
+            del fig_comp
+            gc.collect()
 
     elif compare_mode == "📈 Parameters" and baseline_param:
         st.subheader("📊 Parameter Overlay Studio")
@@ -1007,6 +1027,8 @@ with t4:
             fig_comp2.add_trace(go.Scatter(x=df_base['time_interval'], y=df_base['value'], name=f"BASE: {clean_param_name(baseline_param)}", mode='lines', line=dict(width=3, color='#1e1e1e')))
             base_v = df_base['value'].max()
             metrics2.append({"Parameter": f"BASE: {clean_param_name(baseline_param)}", "Peak (MW)": base_v, "Time": df_base.loc[df_base['value'].idxmax(), 'time_interval'], "Delta (MW)": 0.0, "Var (%)": 0.0})
+            del df_base
+            gc.collect()
 
         for i, p in enumerate(selected_comp_params):
             df_p = run_query("SELECT time_interval, value FROM system_log_data WHERE parameter_name=? AND nepali_year=? AND nepali_month=? AND nepali_day=?", (p, selected_year, selected_month, selected_day))
@@ -1023,6 +1045,8 @@ with t4:
             fig_comp2 = update_chart_layout(fig_comp2, "Parameter Overlay Analytics", legend_orientation="v")
             st.plotly_chart(fig_comp2, use_container_width=True)
             st.dataframe(pd.DataFrame(metrics2).style.format({"Peak (MW)": "{:.2f}", "Delta (MW)": "{:+.2f}", "Var (%)": "{:+.2f}%"}), use_container_width=True)
+            del fig_comp2
+            gc.collect()
 
     elif compare_mode == "📅 Daily Peak/Load Across Months" and comp_param and selected_comp_months:
         st.subheader("📊 Overlay: Daily Peak Trends Across Months")
@@ -1048,6 +1072,8 @@ with t4:
             fig_comp3.update_layout(xaxis=dict(tickmode='linear', tick0=1, dtick=1, range=[0.8, 32.2]))
             st.plotly_chart(fig_comp3, use_container_width=True)
             st.dataframe(pd.DataFrame(metrics3).style.format({"Abs Peak": "{:.2f}", "Avg Peak": "{:.2f}", "Delta": "{:+.2f}", "Var (%)": "{:+.2f}%"}), use_container_width=True)
+            del fig_comp3
+            gc.collect()
 
     elif compare_mode == "📊 Monthly Peak/Load" and comp_param and selected_comp_months:
         st.subheader("📊 Macro-Trend: Absolute Peak Comparison")
@@ -1074,3 +1100,5 @@ with t4:
             fig_bar.update_layout(showlegend=False, yaxis=dict(range=[0, df_m4['Peak (MW)'].max() * 1.15]))
             st.plotly_chart(fig_bar, use_container_width=True)
             st.dataframe(df_m4.style.format({"Peak (MW)": "{:.2f}", "Delta (MW)": "{:+.2f}", "Var (%)": "{:+.2f}%"}), use_container_width=True)
+            del fig_bar
+            gc.collect()
