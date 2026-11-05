@@ -729,55 +729,185 @@ with st.sidebar:
 # ==========================================
 t1, t2, t3, t4 = st.tabs(["⚡ Daily Operations", "📆 Monthly Peak Load Graph", "📈 Historical Monthly Peak Load", "🔍 Comparison Studio"])
 
-# 🚀 HELPER FUNCTION: Dynamic Tab 4 Calculator
-def get_dynamic_comparison_data(year, month, day=None, param=None):
-    if day:
-        query = "SELECT nepali_day, time_interval, parameter_name, value FROM system_log_data WHERE nepali_year=? AND nepali_month=? AND nepali_day=?"
-        params = (year, month, day)
-    else:
-        query = "SELECT nepali_day, time_interval, parameter_name, value FROM system_log_data WHERE nepali_year=? AND nepali_month=? AND nepali_day>0"
-        params = (year, month)
-        
-    df_raw = run_query(query, params)
-    if df_raw.empty: return pd.DataFrame()
-    
-    df_raw['value'] = pd.to_numeric(df_raw['value'], errors='coerce').fillna(0.0)
-    df_piv = df_raw.pivot_table(index=['nepali_day', 'time_interval'], columns='parameter_name', values='value').fillna(0.0).reset_index()
-    
-    supply_cols = ['SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'COMBINED_INTERRUPTION']
-    for col in supply_cols:
-        if col not in df_piv.columns: df_piv[col] = 0.0
-        else: df_piv[col] = df_piv[col].abs()
-        
-    import_cols = [c for c in df_piv.columns if c.startswith('ZONE_IMPORT_') and 'TOTAL' not in c.upper()]
-    if 'ZONE_IMPORT_TOTAL' in df_piv.columns and df_piv['ZONE_IMPORT_TOTAL'].abs().sum() > 0:
-        df_piv['SUMMARY_TOTAL_IMPORT'] = df_piv['ZONE_IMPORT_TOTAL']
-    elif import_cols and df_piv[import_cols].abs().sum().sum() > 0:
-        df_piv['SUMMARY_TOTAL_IMPORT'] = df_piv[import_cols].sum(axis=1)
-    elif 'SUMMARY_TOTAL_IMPORT' not in df_piv.columns:
-        df_piv['SUMMARY_TOTAL_IMPORT'] = 0.0
-        
-    df_piv['SUMMARY_TOTAL_IMPORT'] = df_piv['SUMMARY_TOTAL_IMPORT'].fillna(0.0)
-    
-    df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = (
-        df_piv['SUMMARY_TOTAL_IPP'] + df_piv['SUMMARY_TOTAL_NEA_SUBS'] + 
-        df_piv['SUMMARY_TOTAL_ROR'] + df_piv['SUMMARY_TOTAL_STORAGE'] + 
-        df_piv['SUMMARY_TOTAL_IMPORT'].clip(lower=0) + df_piv['COMBINED_INTERRUPTION']
-    )
-    
-    df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = (
-        df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] - df_piv['SUMMARY_TOTAL_IMPORT'].clip(upper=0).abs()
-    )
-    
-    if param:
-        if param in df_piv.columns:
-            res = df_piv[['nepali_day', 'time_interval', param]].rename(columns={param: 'value'})
-            if param not in ['SUMMARY_TOTAL_IMPORT', 'SUMMARY_TOTAL_EXPORT', 'TOTAL SYSTEM LOAD (ACTUAL)', 'TOTAL NATIONAL LOAD (ACTUAL)'] and not param.startswith('ZONE_IMPORT_') and not param.startswith('ZONE_EXPORT_'):
-                res['value'] = res['value'].abs()
-            return res
+with t4:
+    def get_tab4_data(p_name, y, m, d=None):
+        if d:
+            q = "SELECT nepali_day, time_interval, parameter_name, value FROM system_log_data WHERE nepali_year=? AND nepali_month=? AND nepali_day=?"
+            p = (y, m, d)
         else:
-            return pd.DataFrame(columns=['nepali_day', 'time_interval', 'value'])
-    return df_piv
+            q = "SELECT nepali_day, time_interval, parameter_name, value FROM system_log_data WHERE nepali_year=? AND nepali_month=? AND nepali_day>0"
+            p = (y, m)
+        df = run_query(q, p)
+        if df.empty: return pd.DataFrame(columns=['nepali_day', 'time_interval', 'value'])
+        
+        df['value'] = pd.to_numeric(df['value'], errors='coerce').fillna(0.0)
+        df_piv = df.pivot_table(index=['nepali_day', 'time_interval'], columns='parameter_name', values='value').fillna(0.0).reset_index()
+        
+        supply_cols = ['SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'COMBINED_INTERRUPTION']
+        for c in supply_cols:
+            if c not in df_piv.columns: df_piv[c] = 0.0
+            else: df_piv[c] = df_piv[c].abs()
+            
+        import_cols = [c for c in df_piv.columns if c.startswith('ZONE_IMPORT_') and 'TOTAL' not in c.upper()]
+        if 'ZONE_IMPORT_TOTAL' in df_piv.columns and df_piv['ZONE_IMPORT_TOTAL'].abs().sum() > 0:
+            df_piv['Net Import/Export'] = df_piv['ZONE_IMPORT_TOTAL']
+        elif 'SUMMARY_TOTAL_IMPORT' in df_piv.columns and df_piv['SUMMARY_TOTAL_IMPORT'].abs().sum() > 0:
+            df_piv['Net Import/Export'] = df_piv['SUMMARY_TOTAL_IMPORT']
+        else:
+            if import_cols:
+                df_piv['Net Import/Export'] = df_piv[import_cols].sum(axis=1)
+            else:
+                df_piv['Net Import/Export'] = 0.0
+                
+        df_piv['Net Import/Export'] = df_piv['Net Import/Export'].fillna(0.0)
+        
+        df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = (
+            df_piv['SUMMARY_TOTAL_IPP'] + 
+            df_piv['SUMMARY_TOTAL_NEA_SUBS'] + 
+            df_piv['SUMMARY_TOTAL_ROR'] + 
+            df_piv['SUMMARY_TOTAL_STORAGE'] + 
+            df_piv['Net Import/Export'].clip(lower=0) + 
+            df_piv['COMBINED_INTERRUPTION']
+        )
+        
+        df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = (
+            df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] - df_piv['Net Import/Export'].clip(upper=0).abs()
+        )
+        
+        target_col = p_name
+        if p_name == 'SUMMARY_TOTAL_IMPORT': target_col = 'Net Import/Export'
+        
+        if target_col in df_piv.columns:
+            res = df_piv[['nepali_day', 'time_interval', target_col]].rename(columns={target_col: 'value'})
+            if target_col not in ['Net Import/Export', 'SUMMARY_TOTAL_EXPORT', 'TOTAL SYSTEM LOAD (ACTUAL)', 'TOTAL NATIONAL LOAD (ACTUAL)'] and not target_col.startswith('ZONE_IMPORT_') and not target_col.startswith('ZONE_EXPORT_'):
+                res['value'] = res['value'].abs()
+            return res.sort_values(['nepali_day', 'time_interval'])
+        
+        if p_name in df.parameter_name.values:
+            res = df[df.parameter_name == p_name][['nepali_day', 'time_interval', 'value']]
+            return res.sort_values(['nepali_day', 'time_interval'])
+            
+        return pd.DataFrame(columns=['nepali_day', 'time_interval', 'value'])
+
+    if compare_mode == "🗓️ Date-wise" and comp_param:
+        st.subheader("📊 Date-wise Comparison")
+        fig_comp, metrics = go.Figure(), []
+
+        df_base = get_tab4_data(comp_param, selected_year, selected_month, selected_day)
+        base_v = None
+        if not df_base.empty:
+            df_base['value'] = pd.to_numeric(df_base['value'], errors='coerce').fillna(0.0)
+            df_base = df_base.set_index('time_interval').interpolate(method='linear', limit_direction='both').fillna(0).reset_index()
+            fig_comp.add_trace(go.Scatter(x=df_base['time_interval'], y=df_base['value'], name=f"BASE: {sidebar_date_str}", mode='lines', line=dict(width=3, color='#1e1e1e')))
+            base_v = df_base['value'].max()
+            metrics.append({"Target Date": f"BASE ({sidebar_date_str})", "Peak (MW)": base_v, "Time": df_base.loc[df_base['value'].idxmax(), 'time_interval'], "Delta (MW)": 0.0, "Var (%)": 0.0})
+            del df_base
+            gc.collect()
+
+        for i, d_str in enumerate(selected_comp_days):
+            y, m, d = map(int, d_str.split('/'))
+            df_d = get_tab4_data(comp_param, y, m, d)
+            if not df_d.empty:
+                df_d['value'] = pd.to_numeric(df_d['value'], errors='coerce').fillna(0.0)
+                df_d = df_d.set_index('time_interval').interpolate(method='linear').fillna(0).reset_index()
+                fig_comp.add_trace(go.Scatter(x=df_d['time_interval'], y=df_d['value'], name=d_str, mode='lines', line=dict(dash='dot', color=NEA_PALETTE[i % len(NEA_PALETTE)])))
+                p_v = df_d['value'].max()
+                metrics.append({"Target Date": d_str, "Peak (MW)": p_v, "Time": df_d.loc[df_d['value'].idxmax(), 'time_interval'], "Delta (MW)": (p_v - base_v) if base_v else 0, "Var (%)": ((p_v - base_v) / base_v * 100) if base_v else 0})
+                del df_d
+                gc.collect()
+
+        if metrics:
+            fig_comp = update_chart_layout(fig_comp, f"Date Comparison: {clean_param_name(comp_param)}", legend_orientation="v")
+            st.plotly_chart(fig_comp, use_container_width=True)
+            st.dataframe(pd.DataFrame(metrics).style.format({"Peak (MW)": "{:.2f}", "Delta (MW)": "{:+.2f}", "Var (%)": "{:+.2f}%"}), use_container_width=True)
+            del fig_comp
+            gc.collect()
+
+    elif compare_mode == "📈 Parameters" and baseline_param:
+        st.subheader("📊 Parameter Overlay Studio")
+        fig_comp2, metrics2 = go.Figure(), []
+
+        df_base = get_tab4_data(baseline_param, selected_year, selected_month, selected_day)
+        base_v = None
+        if not df_base.empty:
+            df_base['value'] = pd.to_numeric(df_base['value'], errors='coerce').fillna(0.0)
+            df_base = df_base.set_index('time_interval').interpolate(method='linear').fillna(0).reset_index()
+            fig_comp2.add_trace(go.Scatter(x=df_base['time_interval'], y=df_base['value'], name=f"BASE: {clean_param_name(baseline_param)}", mode='lines', line=dict(width=3, color='#1e1e1e')))
+            base_v = df_base['value'].max()
+            metrics2.append({"Parameter": f"BASE: {clean_param_name(baseline_param)}", "Peak (MW)": base_v, "Time": df_base.loc[df_base['value'].idxmax(), 'time_interval'], "Delta (MW)": 0.0, "Var (%)": 0.0})
+            del df_base
+            gc.collect()
+
+        for i, p in enumerate(selected_comp_params):
+            df_p = get_tab4_data(p, selected_year, selected_month, selected_day)
+            if not df_p.empty:
+                df_p['value'] = pd.to_numeric(df_p['value'], errors='coerce').fillna(0.0)
+                df_p = df_p.set_index('time_interval').interpolate(method='linear').fillna(0).reset_index()
+                fig_comp2.add_trace(go.Scatter(x=df_p['time_interval'], y=df_p['value'], name=clean_param_name(p), mode='lines', line=dict(dash='dot', color=NEA_PALETTE[i % len(NEA_PALETTE)])))
+                p_v = df_p['value'].max()
+                metrics2.append({"Parameter": clean_param_name(p), "Peak (MW)": p_v, "Time": df_p.loc[df_p['value'].idxmax(), 'time_interval'], "Delta (MW)": (p_v - base_v) if base_v else 0, "Var (%)": ((p_v - base_v) / base_v * 100) if base_v else 0})
+                del df_p
+                gc.collect()
+
+        if metrics2:
+            fig_comp2 = update_chart_layout(fig_comp2, "Parameter Overlay Analytics", legend_orientation="v")
+            st.plotly_chart(fig_comp2, use_container_width=True)
+            st.dataframe(pd.DataFrame(metrics2).style.format({"Peak (MW)": "{:.2f}", "Delta (MW)": "{:+.2f}", "Var (%)": "{:+.2f}%"}), use_container_width=True)
+            del fig_comp2
+            gc.collect()
+
+    elif compare_mode == "📅 Daily Peak/Load Across Months" and comp_param and selected_comp_months:
+        st.subheader("📊 Overlay: Daily Peak Trends Across Months")
+        fig_comp3, metrics3 = go.Figure(), []
+        base_v = None
+
+        for i, ym_str in enumerate(selected_comp_months):
+            y, m = map(int, ym_str.split('/'))
+            df_m = get_tab4_data(comp_param, y, m)
+            if not df_m.empty:
+                df_peaks = df_m.loc[df_m.groupby('nepali_day')['value'].idxmax()].sort_values('nepali_day')
+                l_name, l_dict = (f"BASE: {ym_str}", dict(width=3, color='#1e1e1e')) if i == 0 else (ym_str, dict(dash='dot', color=NEA_PALETTE[i % len(NEA_PALETTE)]))
+                fig_comp3.add_trace(go.Scatter(x=df_peaks['nepali_day'], y=df_peaks['value'], name=l_name, mode='lines+markers', line=l_dict, customdata=df_peaks['time_interval'], hovertemplate='Day %{x}<br>Peak: %{y:.2f} MW<br>Time: %{customdata}<extra></extra>'))
+                m_peak = df_peaks['value'].max()
+                if i == 0: base_v = m_peak
+                metrics3.append({"Month": l_name, "Abs Peak": m_peak, "Avg Peak": df_peaks['value'].mean(), "Delta": (m_peak - base_v) if base_v else 0, "Var (%)": ((m_peak - base_v) / base_v * 100) if base_v else 0})
+                del df_m
+                gc.collect()
+
+        if metrics3:
+            fig_comp3 = update_chart_layout(fig_comp3, f"Day-by-Day Peak Curve: {clean_param_name(comp_param)}", xaxis_title="Day of the Month", legend_orientation="v")
+            fig_comp3.update_layout(xaxis=dict(tickmode='linear', tick0=1, dtick=1, range=[0.8, 32.2]))
+            st.plotly_chart(fig_comp3, use_container_width=True)
+            st.dataframe(pd.DataFrame(metrics3).style.format({"Abs Peak": "{:.2f}", "Avg Peak": "{:.2f}", "Delta": "{:+.2f}", "Var (%)": "{:+.2f}%"}), use_container_width=True)
+            del fig_comp3
+            gc.collect()
+
+    elif compare_mode == "📊 Monthly Peak/Load" and comp_param and selected_comp_months:
+        st.subheader("📊 Macro-Trend: Absolute Peak Comparison")
+        metrics4 = []
+        base_v = None
+
+        for i, ym_str in enumerate(selected_comp_months):
+            y, m = map(int, ym_str.split('/'))
+            df_p = get_tab4_data(comp_param, y, m)
+            if not df_p.empty:
+                df_p = df_p.sort_values(by='value', ascending=False).head(1)
+                p_v, p_d, p_t = df_p.iloc[0]['value'], df_p.iloc[0]['nepali_day'], df_p.iloc[0]['time_interval']
+                if i == 0: base_v = p_v
+                metrics4.append({"Month": f"BASE: {ym_str}" if i == 0 else ym_str, "Peak (MW)": p_v, "Day": p_d, "Time": p_t, "Delta (MW)": (p_v - base_v) if base_v else 0, "Var (%)": ((p_v - base_v) / base_v * 100) if base_v else 0})
+                del df_p
+                gc.collect()
+
+        if metrics4:
+            df_m4 = pd.DataFrame(metrics4)
+            fig_bar = px.bar(df_m4, x="Month", y="Peak (MW)", text="Peak (MW)", color="Month", title=f"Absolute Monthly Peaks: {clean_param_name(comp_param)}", color_discrete_sequence=['#0052cc', '#33b2df', '#ff3366', '#fdbb2d'])
+            fig_bar.update_traces(texttemplate='%{text:.2f} MW', textposition='outside')
+            fig_bar = update_chart_layout(fig_bar, f"Absolute Monthly Peaks: {clean_param_name(comp_param)}", xaxis_title="")
+            fig_bar.update_layout(showlegend=False, yaxis=dict(range=[0, df_m4['Peak (MW)'].max() * 1.15]))
+            st.plotly_chart(fig_bar, use_container_width=True)
+            st.dataframe(df_m4.style.format({"Peak (MW)": "{:.2f}", "Delta (MW)": "{:+.2f}", "Var (%)": "{:+.2f}%"}), use_container_width=True)
+            del fig_bar
+            gc.collect()
 
 with t1:
     st1, st2, st3, st4, st5, st6 = st.tabs(["Main System", "Total IMPORT", "Total NEA SUBSIDIARIES", "Total IPP", "Total ROR", "Total STORAGE"])
@@ -922,239 +1052,4 @@ with t1:
                 render_sub('ZONE_STORAGE_', 'Storage Plants', enable_plant_filter=False, use_abs=True, stack=True)
             
             del df_all
-            gc.collect()
-
-with t2:
-    st.subheader(f"📊 Daily Peak Loads for Month {selected_month}, {selected_year}")
-    
-    query_monthly = "SELECT nepali_day, time_interval, parameter_name, value FROM system_log_data WHERE nepali_year = ? AND nepali_month = ? AND nepali_day > 0 AND (parameter_name IN ('SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'COMBINED_INTERRUPTION', 'SUMMARY_TOTAL_IMPORT') OR parameter_name LIKE 'ZONE_IMPORT_%')"
-    df_raw = run_query(query_monthly, (selected_year, selected_month))
-
-    if not df_raw.empty:
-        df_raw['value'] = pd.to_numeric(df_raw['value'], errors='coerce').fillna(0.0)
-        df_piv = df_raw.pivot_table(index=['nepali_day', 'time_interval'], columns='parameter_name', values='value').fillna(0.0).reset_index()
-        del df_raw
-        gc.collect()
-        
-        supply_cols = ['SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'COMBINED_INTERRUPTION']
-        for col in supply_cols:
-            if col not in df_piv.columns: df_piv[col] = 0.0
-            else: df_piv[col] = df_piv[col].abs()
-            
-        import_cols = [c for c in df_piv.columns if c.startswith('ZONE_IMPORT_') and 'TOTAL' not in c.upper()]
-        if 'ZONE_IMPORT_TOTAL' in df_piv.columns and df_piv['ZONE_IMPORT_TOTAL'].abs().sum() > 0:
-            df_piv['Net Import/Export'] = df_piv['ZONE_IMPORT_TOTAL']
-        elif 'SUMMARY_TOTAL_IMPORT' in df_piv.columns and df_piv['SUMMARY_TOTAL_IMPORT'].abs().sum() > 0:
-            df_piv['Net Import/Export'] = df_piv['SUMMARY_TOTAL_IMPORT']
-        else:
-            if import_cols:
-                df_piv['Net Import/Export'] = df_piv[import_cols].sum(axis=1)
-            else:
-                df_piv['Net Import/Export'] = 0.0
-            
-        df_piv['Net Import/Export'] = df_piv['Net Import/Export'].fillna(0.0)
-            
-        df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = (
-            df_piv['SUMMARY_TOTAL_IPP'] + 
-            df_piv['SUMMARY_TOTAL_NEA_SUBS'] + 
-            df_piv['SUMMARY_TOTAL_ROR'] + 
-            df_piv['SUMMARY_TOTAL_STORAGE'] + 
-            df_piv['Net Import/Export'].clip(lower=0) + 
-            df_piv['COMBINED_INTERRUPTION']
-        )
-        
-        df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = (
-            df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] - df_piv['Net Import/Export'].clip(upper=0).abs()
-        )
-
-        sys_d = df_piv.loc[df_piv.groupby('nepali_day')['TOTAL SYSTEM LOAD (ACTUAL)'].idxmax(), ['nepali_day', 'time_interval', 'TOTAL SYSTEM LOAD (ACTUAL)']].rename(columns={'TOTAL SYSTEM LOAD (ACTUAL)': 'Peak_MW'}).assign(**{'Load Type': 'System Peak Load'})
-        nat_d = df_piv.loc[df_piv.groupby('nepali_day')['TOTAL NATIONAL LOAD (ACTUAL)'].idxmax(), ['nepali_day', 'time_interval', 'TOTAL NATIONAL LOAD (ACTUAL)']].rename(columns={'TOTAL NATIONAL LOAD (ACTUAL)': 'Peak_MW'}).assign(**{'Load Type': 'National Peak Load'})
-        
-        df_comb = pd.concat([sys_d, nat_d]).sort_values('nepali_day')
-        fig_m = px.line(df_comb, x='nepali_day', y='Peak_MW', color='Load Type', custom_data=['time_interval'], markers=True, color_discrete_sequence=['#ff3366', '#0052cc'])
-        fig_m.update_traces(hovertemplate='<b>%{fullData.name}</b><br>Day %{x}<br>Peak Load: %{y:.2f} MW<br>Time: %{customdata[0]}<extra></extra>')
-        fig_m = update_chart_layout(fig_m, "System vs National Peak Load Each Day", xaxis_title="Day of Month", legend_orientation="v")
-        fig_m.update_layout(xaxis=dict(tickmode='linear', tick0=1, dtick=1, range=[0.8, 32.2]))
-        st.plotly_chart(fig_m, use_container_width=True)
-        del df_comb, fig_m, sys_d, nat_d, df_piv
-        gc.collect()
-
-with t3:
-    st.subheader("📈 Historical Trend: Maximum Load per Month")
-    
-    query_historical = "SELECT nepali_year, nepali_month, nepali_day, time_interval, parameter_name, value FROM system_log_data WHERE nepali_day > 0 AND (parameter_name IN ('SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'COMBINED_INTERRUPTION', 'SUMMARY_TOTAL_IMPORT') OR parameter_name LIKE 'ZONE_IMPORT_%')"
-    df_raw = run_query(query_historical)
-
-    if not df_raw.empty:
-        df_raw['value'] = pd.to_numeric(df_raw['value'], errors='coerce').fillna(0.0)
-        df_piv = df_raw.pivot_table(index=['nepali_year', 'nepali_month', 'nepali_day', 'time_interval'], columns='parameter_name', values='value').fillna(0.0).reset_index()
-        del df_raw
-        gc.collect()
-        
-        supply_cols = ['SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'COMBINED_INTERRUPTION']
-        for col in supply_cols:
-            if col not in df_piv.columns: df_piv[col] = 0.0
-            else: df_piv[col] = df_piv[col].abs()
-            
-        import_cols = [c for c in df_piv.columns if c.startswith('ZONE_IMPORT_') and 'TOTAL' not in c.upper()]
-        if 'ZONE_IMPORT_TOTAL' in df_piv.columns and df_piv['ZONE_IMPORT_TOTAL'].abs().sum() > 0:
-            df_piv['Net Import/Export'] = df_piv['ZONE_IMPORT_TOTAL']
-        elif 'SUMMARY_TOTAL_IMPORT' in df_piv.columns and df_piv['SUMMARY_TOTAL_IMPORT'].abs().sum() > 0:
-            df_piv['Net Import/Export'] = df_piv['SUMMARY_TOTAL_IMPORT']
-        else:
-            if import_cols:
-                df_piv['Net Import/Export'] = df_piv[import_cols].sum(axis=1)
-            else:
-                df_piv['Net Import/Export'] = 0.0
-            
-        df_piv['Net Import/Export'] = df_piv['Net Import/Export'].fillna(0.0)
-            
-        df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = (
-            df_piv['SUMMARY_TOTAL_IPP'] + 
-            df_piv['SUMMARY_TOTAL_NEA_SUBS'] + 
-            df_piv['SUMMARY_TOTAL_ROR'] + 
-            df_piv['SUMMARY_TOTAL_STORAGE'] + 
-            df_piv['Net Import/Export'].clip(lower=0) + 
-            df_piv['COMBINED_INTERRUPTION']
-        )
-        
-        df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = (
-            df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] - df_piv['Net Import/Export'].clip(upper=0).abs()
-        )
-
-        s_d = df_piv.loc[df_piv.groupby(['nepali_year', 'nepali_month'])['TOTAL SYSTEM LOAD (ACTUAL)'].idxmax(), ['nepali_year', 'nepali_month', 'nepali_day', 'time_interval', 'TOTAL SYSTEM LOAD (ACTUAL)']].rename(columns={'TOTAL SYSTEM LOAD (ACTUAL)': 'Peak_MW'}).assign(**{'Load Type': 'System Peak Load'})
-        n_d = df_piv.loc[df_piv.groupby(['nepali_year', 'nepali_month'])['TOTAL NATIONAL LOAD (ACTUAL)'].idxmax(), ['nepali_year', 'nepali_month', 'nepali_day', 'time_interval', 'TOTAL NATIONAL LOAD (ACTUAL)']].rename(columns={'TOTAL NATIONAL LOAD (ACTUAL)': 'Peak_MW'}).assign(**{'Load Type': 'National Peak Load'})
-
-        df_c = pd.concat([s_d, n_d])
-        df_c['YM'] = df_c['nepali_year'].astype(str) + "/" + df_c['nepali_month'].astype(str).str.zfill(2)
-        df_c.sort_values(['nepali_year', 'nepali_month'], inplace=True)
-
-        fig_h = px.line(df_c, x='YM', y='Peak_MW', color='Load Type', custom_data=['nepali_day', 'time_interval'], markers=True, color_discrete_sequence=['#ff3366', '#0052cc'])
-        fig_h.update_traces(hovertemplate='<b>%{fullData.name}</b><br>Month: %{x}<br>Peak Load: %{y:.2f} MW<br>Day: %{customdata[0]}<br>Time: %{customdata[1]}<extra></extra>')
-        fig_h = update_chart_layout(fig_h, "System vs National Growth: Monthly Peaks Over Time", xaxis_title="Nepali Year/Month", legend_orientation="v")
-        st.plotly_chart(fig_h, use_container_width=True)
-        del df_c, fig_h, s_d, n_d, df_piv
-        gc.collect()
-
-with t4:
-    if compare_mode == "🗓️ Date-wise" and comp_param:
-        st.subheader("📊 Date-wise Comparison")
-        fig_comp, metrics = go.Figure(), []
-
-        df_base = get_dynamic_comparison_data(selected_year, selected_month, selected_day, comp_param)
-        base_v = None
-        if not df_base.empty:
-            df_base = df_base.set_index('time_interval').interpolate(method='linear', limit_direction='both').fillna(0).reset_index()
-            fig_comp.add_trace(go.Scatter(x=df_base['time_interval'], y=df_base['value'], name=f"BASE: {sidebar_date_str}", mode='lines', line=dict(width=3, color='#1e1e1e')))
-            base_v = df_base['value'].max()
-            metrics.append({"Target Date": f"BASE ({sidebar_date_str})", "Peak (MW)": base_v, "Time": df_base.loc[df_base['value'].idxmax(), 'time_interval'], "Delta (MW)": 0.0, "Var (%)": 0.0})
-            del df_base
-            gc.collect()
-
-        for i, d_str in enumerate(selected_comp_days):
-            y, m, d = map(int, d_str.split('/'))
-            df_d = get_dynamic_comparison_data(y, m, d, comp_param)
-            if not df_d.empty:
-                df_d = df_d.set_index('time_interval').interpolate(method='linear').fillna(0).reset_index()
-                fig_comp.add_trace(go.Scatter(x=df_d['time_interval'], y=df_d['value'], name=d_str, mode='lines', line=dict(dash='dot', color=NEA_PALETTE[i % len(NEA_PALETTE)])))
-                p_v = df_d['value'].max()
-                metrics.append({"Target Date": d_str, "Peak (MW)": p_v, "Time": df_d.loc[df_d['value'].idxmax(), 'time_interval'], "Delta (MW)": (p_v - base_v) if base_v else 0, "Var (%)": ((p_v - base_v) / base_v * 100) if base_v else 0})
-                del df_d
-                gc.collect()
-
-        if metrics:
-            fig_comp = update_chart_layout(fig_comp, f"Date Comparison: {clean_param_name(comp_param)}", legend_orientation="v")
-            st.plotly_chart(fig_comp, use_container_width=True)
-            st.dataframe(pd.DataFrame(metrics).style.format({"Peak (MW)": "{:.2f}", "Delta (MW)": "{:+.2f}", "Var (%)": "{:+.2f}%"}), use_container_width=True)
-            del fig_comp
-            gc.collect()
-
-    elif compare_mode == "📈 Parameters" and baseline_param:
-        st.subheader("📊 Parameter Overlay Studio")
-        fig_comp2, metrics2 = go.Figure(), []
-
-        df_full = get_dynamic_comparison_data(selected_year, selected_month, selected_day)
-        
-        if not df_full.empty:
-            def extract_param(df, p):
-                if p not in df.columns: return pd.DataFrame()
-                res = df[['time_interval', p]].rename(columns={p: 'value'})
-                if p not in ['SUMMARY_TOTAL_IMPORT', 'SUMMARY_TOTAL_EXPORT', 'TOTAL SYSTEM LOAD (ACTUAL)', 'TOTAL NATIONAL LOAD (ACTUAL)'] and not p.startswith('ZONE_IMPORT_') and not p.startswith('ZONE_EXPORT_'):
-                    res['value'] = res['value'].abs()
-                return res
-
-            df_base = extract_param(df_full, baseline_param)
-            base_v = None
-            if not df_base.empty:
-                df_base = df_base.set_index('time_interval').interpolate(method='linear').fillna(0).reset_index()
-                fig_comp2.add_trace(go.Scatter(x=df_base['time_interval'], y=df_base['value'], name=f"BASE: {clean_param_name(baseline_param)}", mode='lines', line=dict(width=3, color='#1e1e1e')))
-                base_v = df_base['value'].max()
-                metrics2.append({"Parameter": f"BASE: {clean_param_name(baseline_param)}", "Peak (MW)": base_v, "Time": df_base.loc[df_base['value'].idxmax(), 'time_interval'], "Delta (MW)": 0.0, "Var (%)": 0.0})
-
-            for i, p in enumerate(selected_comp_params):
-                df_p = extract_param(df_full, p)
-                if not df_p.empty:
-                    df_p = df_p.set_index('time_interval').interpolate(method='linear').fillna(0).reset_index()
-                    fig_comp2.add_trace(go.Scatter(x=df_p['time_interval'], y=df_p['value'], name=clean_param_name(p), mode='lines', line=dict(dash='dot', color=NEA_PALETTE[i % len(NEA_PALETTE)])))
-                    p_v = df_p['value'].max()
-                    metrics2.append({"Parameter": clean_param_name(p), "Peak (MW)": p_v, "Time": df_p.loc[df_p['value'].idxmax(), 'time_interval'], "Delta (MW)": (p_v - base_v) if base_v else 0, "Var (%)": ((p_v - base_v) / base_v * 100) if base_v else 0})
-
-        if metrics2:
-            fig_comp2 = update_chart_layout(fig_comp2, "Parameter Overlay Analytics", legend_orientation="v")
-            st.plotly_chart(fig_comp2, use_container_width=True)
-            st.dataframe(pd.DataFrame(metrics2).style.format({"Peak (MW)": "{:.2f}", "Delta (MW)": "{:+.2f}", "Var (%)": "{:+.2f}%"}), use_container_width=True)
-            del fig_comp2
-            gc.collect()
-
-    elif compare_mode == "📅 Daily Peak/Load Across Months" and comp_param and selected_comp_months:
-        st.subheader("📊 Overlay: Daily Peak Trends Across Months")
-        fig_comp3, metrics3 = go.Figure(), []
-        base_v = None
-
-        for i, ym_str in enumerate(selected_comp_months):
-            y, m = map(int, ym_str.split('/'))
-            df_m = get_dynamic_comparison_data(y, m, param=comp_param)
-            if not df_m.empty:
-                df_peaks = df_m.loc[df_m.groupby('nepali_day')['value'].idxmax()].sort_values('nepali_day')
-                l_name, l_dict = (f"BASE: {ym_str}", dict(width=3, color='#1e1e1e')) if i == 0 else (ym_str, dict(dash='dot', color=NEA_PALETTE[i % len(NEA_PALETTE)]))
-                fig_comp3.add_trace(go.Scatter(x=df_peaks['nepali_day'], y=df_peaks['value'], name=l_name, mode='lines+markers', line=l_dict, customdata=df_peaks['time_interval'], hovertemplate='Day %{x}<br>Peak: %{y:.2f} MW<br>Time: %{customdata}<extra></extra>'))
-                m_peak = df_peaks['value'].max()
-                if i == 0: base_v = m_peak
-                metrics3.append({"Month": l_name, "Abs Peak": m_peak, "Avg Peak": df_peaks['value'].mean(), "Delta": (m_peak - base_v) if base_v else 0, "Var (%)": ((m_peak - base_v) / base_v * 100) if base_v else 0})
-                del df_m
-                gc.collect()
-
-        if metrics3:
-            fig_comp3 = update_chart_layout(fig_comp3, f"Day-by-Day Peak Curve: {clean_param_name(comp_param)}", xaxis_title="Day of the Month", legend_orientation="v")
-            fig_comp3.update_layout(xaxis=dict(tickmode='linear', tick0=1, dtick=1, range=[0.8, 32.2]))
-            st.plotly_chart(fig_comp3, use_container_width=True)
-            st.dataframe(pd.DataFrame(metrics3).style.format({"Abs Peak": "{:.2f}", "Avg Peak": "{:.2f}", "Delta": "{:+.2f}", "Var (%)": "{:+.2f}%"}), use_container_width=True)
-            del fig_comp3
-            gc.collect()
-
-    elif compare_mode == "📊 Monthly Peak/Load" and comp_param and selected_comp_months:
-        st.subheader("📊 Macro-Trend: Absolute Peak Comparison")
-        metrics4 = []
-        base_v = None
-
-        for i, ym_str in enumerate(selected_comp_months):
-            y, m = map(int, ym_str.split('/'))
-            df_p = get_dynamic_comparison_data(y, m, param=comp_param)
-            if not df_p.empty:
-                df_p = df_p.sort_values(by='value', ascending=False).head(1)
-                p_v, p_d, p_t = df_p.iloc[0]['value'], df_p.iloc[0]['nepali_day'], df_p.iloc[0]['time_interval']
-                if i == 0: base_v = p_v
-                metrics4.append({"Month": f"BASE: {ym_str}" if i == 0 else ym_str, "Peak (MW)": p_v, "Day": p_d, "Time": p_t, "Delta (MW)": (p_v - base_v) if base_v else 0, "Var (%)": ((p_v - base_v) / base_v * 100) if base_v else 0})
-                del df_p
-                gc.collect()
-
-        if metrics4:
-            df_m4 = pd.DataFrame(metrics4)
-            fig_bar = px.bar(df_m4, x="Month", y="Peak (MW)", text="Peak (MW)", color="Month", title=f"Absolute Monthly Peaks: {clean_param_name(comp_param)}", color_discrete_sequence=['#0052cc', '#33b2df', '#ff3366', '#fdbb2d'])
-            fig_bar.update_traces(texttemplate='%{text:.2f} MW', textposition='outside')
-            fig_bar = update_chart_layout(fig_bar, f"Absolute Monthly Peaks: {clean_param_name(comp_param)}", xaxis_title="")
-            fig_bar.update_layout(showlegend=False, yaxis=dict(range=[0, df_m4['Peak (MW)'].max() * 1.15]))
-            st.plotly_chart(fig_bar, use_container_width=True)
-            st.dataframe(df_m4.style.format({"Peak (MW)": "{:.2f}", "Delta (MW)": "{:+.2f}", "Var (%)": "{:+.2f}%"}), use_container_width=True)
-            del fig_bar
             gc.collect()
