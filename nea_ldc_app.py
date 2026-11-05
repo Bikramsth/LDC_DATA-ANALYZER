@@ -217,14 +217,12 @@ def extract_data(df, year, month, day, cursor):
         ror = abs(params.get('SUMMARY_TOTAL_ROR', 0.0))
         storage = abs(params.get('SUMMARY_TOTAL_STORAGE', 0.0))
         
-        # 🚀 FORCED FALLBACK: Sum the exact tie lines if the summary row is 0.0
-        imp_lines = [v for k, v in params.items() if str(k).startswith('ZONE_IMPORT_') and 'TOTAL' not in str(k).upper()]
-        if sum(abs(v) for v in imp_lines) > 0:
-            imp_total = sum(imp_lines)
+        if 'ZONE_IMPORT_TOTAL' in params and abs(params['ZONE_IMPORT_TOTAL']) > 0:
+            imp_total = params['ZONE_IMPORT_TOTAL']
         elif 'SUMMARY_TOTAL_IMPORT' in params and abs(params['SUMMARY_TOTAL_IMPORT']) > 0:
             imp_total = params['SUMMARY_TOTAL_IMPORT']
         else:
-            imp_total = 0.0
+            imp_total = sum(v for k, v in params.items() if str(k).startswith('ZONE_IMPORT_') and 'TOTAL' not in str(k).upper())
 
         interruption = sum(abs(v) for k, v in params.items() if 'INTERRUPT' in k.upper() or 'TRIP' in k.upper())
 
@@ -731,6 +729,56 @@ with st.sidebar:
 # ==========================================
 t1, t2, t3, t4 = st.tabs(["⚡ Daily Operations", "📆 Monthly Peak Load Graph", "📈 Historical Monthly Peak Load", "🔍 Comparison Studio"])
 
+# 🚀 HELPER FUNCTION: Dynamic Tab 4 Calculator
+def get_dynamic_comparison_data(year, month, day=None, param=None):
+    if day:
+        query = "SELECT nepali_day, time_interval, parameter_name, value FROM system_log_data WHERE nepali_year=? AND nepali_month=? AND nepali_day=?"
+        params = (year, month, day)
+    else:
+        query = "SELECT nepali_day, time_interval, parameter_name, value FROM system_log_data WHERE nepali_year=? AND nepali_month=? AND nepali_day>0"
+        params = (year, month)
+        
+    df_raw = run_query(query, params)
+    if df_raw.empty: return pd.DataFrame()
+    
+    df_raw['value'] = pd.to_numeric(df_raw['value'], errors='coerce').fillna(0.0)
+    df_piv = df_raw.pivot_table(index=['nepali_day', 'time_interval'], columns='parameter_name', values='value').fillna(0.0).reset_index()
+    
+    supply_cols = ['SUMMARY_TOTAL_IPP', 'SUMMARY_TOTAL_NEA_SUBS', 'SUMMARY_TOTAL_ROR', 'SUMMARY_TOTAL_STORAGE', 'COMBINED_INTERRUPTION']
+    for col in supply_cols:
+        if col not in df_piv.columns: df_piv[col] = 0.0
+        else: df_piv[col] = df_piv[col].abs()
+        
+    import_cols = [c for c in df_piv.columns if c.startswith('ZONE_IMPORT_') and 'TOTAL' not in c.upper()]
+    if 'ZONE_IMPORT_TOTAL' in df_piv.columns and df_piv['ZONE_IMPORT_TOTAL'].abs().sum() > 0:
+        df_piv['SUMMARY_TOTAL_IMPORT'] = df_piv['ZONE_IMPORT_TOTAL']
+    elif import_cols and df_piv[import_cols].abs().sum().sum() > 0:
+        df_piv['SUMMARY_TOTAL_IMPORT'] = df_piv[import_cols].sum(axis=1)
+    elif 'SUMMARY_TOTAL_IMPORT' not in df_piv.columns:
+        df_piv['SUMMARY_TOTAL_IMPORT'] = 0.0
+        
+    df_piv['SUMMARY_TOTAL_IMPORT'] = df_piv['SUMMARY_TOTAL_IMPORT'].fillna(0.0)
+    
+    df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] = (
+        df_piv['SUMMARY_TOTAL_IPP'] + df_piv['SUMMARY_TOTAL_NEA_SUBS'] + 
+        df_piv['SUMMARY_TOTAL_ROR'] + df_piv['SUMMARY_TOTAL_STORAGE'] + 
+        df_piv['SUMMARY_TOTAL_IMPORT'].clip(lower=0) + df_piv['COMBINED_INTERRUPTION']
+    )
+    
+    df_piv['TOTAL NATIONAL LOAD (ACTUAL)'] = (
+        df_piv['TOTAL SYSTEM LOAD (ACTUAL)'] - df_piv['SUMMARY_TOTAL_IMPORT'].clip(upper=0).abs()
+    )
+    
+    if param:
+        if param in df_piv.columns:
+            res = df_piv[['nepali_day', 'time_interval', param]].rename(columns={param: 'value'})
+            if param not in ['SUMMARY_TOTAL_IMPORT', 'SUMMARY_TOTAL_EXPORT', 'TOTAL SYSTEM LOAD (ACTUAL)', 'TOTAL NATIONAL LOAD (ACTUAL)'] and not param.startswith('ZONE_IMPORT_') and not param.startswith('ZONE_EXPORT_'):
+                res['value'] = res['value'].abs()
+            return res
+        else:
+            return pd.DataFrame(columns=['nepali_day', 'time_interval', 'value'])
+    return df_piv
+
 with t1:
     st1, st2, st3, st4, st5, st6 = st.tabs(["Main System", "Total IMPORT", "Total NEA SUBSIDIARIES", "Total IPP", "Total ROR", "Total STORAGE"])
     
@@ -744,16 +792,17 @@ with t1:
                 
                 df_import = df_all[df_all['parameter_name'].str.startswith('ZONE_IMPORT_')].pivot(index='Time', columns='parameter_name', values='MW').fillna(0.0)
                 
-                imp_cols = [c for c in df_import.columns if 'TOTAL' not in c.upper()]
-                if imp_cols and df_import[imp_cols].abs().sum().sum() > 0:
-                    df_piv['Net Import/Export'] = df_import[imp_cols].sum(axis=1)
+                if 'ZONE_IMPORT_TOTAL' in df_import.columns and df_import['ZONE_IMPORT_TOTAL'].abs().sum() > 0:
+                    df_piv['Net Import/Export'] = df_import['ZONE_IMPORT_TOTAL']
                 elif 'SUMMARY_TOTAL_IMPORT' in df_all['parameter_name'].values:
                     df_sum = df_all[df_all['parameter_name'] == 'SUMMARY_TOTAL_IMPORT'].pivot(index='Time', columns='parameter_name', values='MW').fillna(0.0)
                     df_piv['Net Import/Export'] = df_sum['SUMMARY_TOTAL_IMPORT']
                 else:
-                    df_piv['Net Import/Export'] = 0.0
-                    
-                df_piv['Net Import/Export'] = df_piv['Net Import/Export'].fillna(0.0)
+                    imp_cols = [c for c in df_import.columns if 'TOTAL' not in c.upper()]
+                    if imp_cols:
+                        df_piv['Net Import/Export'] = df_import[imp_cols].sum(axis=1)
+                    else:
+                        df_piv['Net Import/Export'] = 0.0
 
                 for col in req_p:
                     if col not in df_piv.columns: 
@@ -893,12 +942,15 @@ with t2:
             else: df_piv[col] = df_piv[col].abs()
             
         import_cols = [c for c in df_piv.columns if c.startswith('ZONE_IMPORT_') and 'TOTAL' not in c.upper()]
-        if import_cols and df_piv[import_cols].abs().sum().sum() > 0:
-            df_piv['Net Import/Export'] = df_piv[import_cols].sum(axis=1)
+        if 'ZONE_IMPORT_TOTAL' in df_piv.columns and df_piv['ZONE_IMPORT_TOTAL'].abs().sum() > 0:
+            df_piv['Net Import/Export'] = df_piv['ZONE_IMPORT_TOTAL']
         elif 'SUMMARY_TOTAL_IMPORT' in df_piv.columns and df_piv['SUMMARY_TOTAL_IMPORT'].abs().sum() > 0:
             df_piv['Net Import/Export'] = df_piv['SUMMARY_TOTAL_IMPORT']
         else:
-            df_piv['Net Import/Export'] = 0.0
+            if import_cols:
+                df_piv['Net Import/Export'] = df_piv[import_cols].sum(axis=1)
+            else:
+                df_piv['Net Import/Export'] = 0.0
             
         df_piv['Net Import/Export'] = df_piv['Net Import/Export'].fillna(0.0)
             
@@ -945,12 +997,15 @@ with t3:
             else: df_piv[col] = df_piv[col].abs()
             
         import_cols = [c for c in df_piv.columns if c.startswith('ZONE_IMPORT_') and 'TOTAL' not in c.upper()]
-        if import_cols and df_piv[import_cols].abs().sum().sum() > 0:
-            df_piv['Net Import/Export'] = df_piv[import_cols].sum(axis=1)
+        if 'ZONE_IMPORT_TOTAL' in df_piv.columns and df_piv['ZONE_IMPORT_TOTAL'].abs().sum() > 0:
+            df_piv['Net Import/Export'] = df_piv['ZONE_IMPORT_TOTAL']
         elif 'SUMMARY_TOTAL_IMPORT' in df_piv.columns and df_piv['SUMMARY_TOTAL_IMPORT'].abs().sum() > 0:
             df_piv['Net Import/Export'] = df_piv['SUMMARY_TOTAL_IMPORT']
         else:
-            df_piv['Net Import/Export'] = 0.0
+            if import_cols:
+                df_piv['Net Import/Export'] = df_piv[import_cols].sum(axis=1)
+            else:
+                df_piv['Net Import/Export'] = 0.0
             
         df_piv['Net Import/Export'] = df_piv['Net Import/Export'].fillna(0.0)
             
@@ -986,10 +1041,9 @@ with t4:
         st.subheader("📊 Date-wise Comparison")
         fig_comp, metrics = go.Figure(), []
 
-        df_base = run_query("SELECT time_interval, value FROM system_log_data WHERE parameter_name = ? AND nepali_year = ? AND nepali_month = ? AND nepali_day = ? ORDER BY time_interval ASC", (comp_param, selected_year, selected_month, selected_day))
+        df_base = get_dynamic_comparison_data(selected_year, selected_month, selected_day, comp_param)
         base_v = None
         if not df_base.empty:
-            df_base['value'] = pd.to_numeric(df_base['value'], errors='coerce').fillna(0.0).abs()
             df_base = df_base.set_index('time_interval').interpolate(method='linear', limit_direction='both').fillna(0).reset_index()
             fig_comp.add_trace(go.Scatter(x=df_base['time_interval'], y=df_base['value'], name=f"BASE: {sidebar_date_str}", mode='lines', line=dict(width=3, color='#1e1e1e')))
             base_v = df_base['value'].max()
@@ -999,9 +1053,8 @@ with t4:
 
         for i, d_str in enumerate(selected_comp_days):
             y, m, d = map(int, d_str.split('/'))
-            df_d = run_query("SELECT time_interval, value FROM system_log_data WHERE parameter_name = ? AND nepali_year = ? AND nepali_month = ? AND nepali_day = ? ORDER BY time_interval ASC", (comp_param, y, m, d))
+            df_d = get_dynamic_comparison_data(y, m, d, comp_param)
             if not df_d.empty:
-                df_d['value'] = pd.to_numeric(df_d['value'], errors='coerce').fillna(0.0).abs()
                 df_d = df_d.set_index('time_interval').interpolate(method='linear').fillna(0).reset_index()
                 fig_comp.add_trace(go.Scatter(x=df_d['time_interval'], y=df_d['value'], name=d_str, mode='lines', line=dict(dash='dot', color=NEA_PALETTE[i % len(NEA_PALETTE)])))
                 p_v = df_d['value'].max()
@@ -1020,27 +1073,31 @@ with t4:
         st.subheader("📊 Parameter Overlay Studio")
         fig_comp2, metrics2 = go.Figure(), []
 
-        df_base = run_query("SELECT time_interval, value FROM system_log_data WHERE parameter_name=? AND nepali_year=? AND nepali_month=? AND nepali_day=?", (baseline_param, selected_year, selected_month, selected_day))
-        base_v = None
-        if not df_base.empty:
-            df_base['value'] = pd.to_numeric(df_base['value'], errors='coerce').fillna(0.0).abs()
-            df_base = df_base.set_index('time_interval').interpolate(method='linear').fillna(0).reset_index()
-            fig_comp2.add_trace(go.Scatter(x=df_base['time_interval'], y=df_base['value'], name=f"BASE: {clean_param_name(baseline_param)}", mode='lines', line=dict(width=3, color='#1e1e1e')))
-            base_v = df_base['value'].max()
-            metrics2.append({"Parameter": f"BASE: {clean_param_name(baseline_param)}", "Peak (MW)": base_v, "Time": df_base.loc[df_base['value'].idxmax(), 'time_interval'], "Delta (MW)": 0.0, "Var (%)": 0.0})
-            del df_base
-            gc.collect()
+        df_full = get_dynamic_comparison_data(selected_year, selected_month, selected_day)
+        
+        if not df_full.empty:
+            def extract_param(df, p):
+                if p not in df.columns: return pd.DataFrame()
+                res = df[['time_interval', p]].rename(columns={p: 'value'})
+                if p not in ['SUMMARY_TOTAL_IMPORT', 'SUMMARY_TOTAL_EXPORT', 'TOTAL SYSTEM LOAD (ACTUAL)', 'TOTAL NATIONAL LOAD (ACTUAL)'] and not p.startswith('ZONE_IMPORT_') and not p.startswith('ZONE_EXPORT_'):
+                    res['value'] = res['value'].abs()
+                return res
 
-        for i, p in enumerate(selected_comp_params):
-            df_p = run_query("SELECT time_interval, value FROM system_log_data WHERE parameter_name=? AND nepali_year=? AND nepali_month=? AND nepali_day=?", (p, selected_year, selected_month, selected_day))
-            if not df_p.empty:
-                df_p['value'] = pd.to_numeric(df_p['value'], errors='coerce').fillna(0.0).abs()
-                df_p = df_p.set_index('time_interval').interpolate(method='linear').fillna(0).reset_index()
-                fig_comp2.add_trace(go.Scatter(x=df_p['time_interval'], y=df_p['value'], name=clean_param_name(p), mode='lines', line=dict(dash='dot', color=NEA_PALETTE[i % len(NEA_PALETTE)])))
-                p_v = df_p['value'].max()
-                metrics2.append({"Parameter": clean_param_name(p), "Peak (MW)": p_v, "Time": df_p.loc[df_p['value'].idxmax(), 'time_interval'], "Delta (MW)": (p_v - base_v) if base_v else 0, "Var (%)": ((p_v - base_v) / base_v * 100) if base_v else 0})
-                del df_p
-                gc.collect()
+            df_base = extract_param(df_full, baseline_param)
+            base_v = None
+            if not df_base.empty:
+                df_base = df_base.set_index('time_interval').interpolate(method='linear').fillna(0).reset_index()
+                fig_comp2.add_trace(go.Scatter(x=df_base['time_interval'], y=df_base['value'], name=f"BASE: {clean_param_name(baseline_param)}", mode='lines', line=dict(width=3, color='#1e1e1e')))
+                base_v = df_base['value'].max()
+                metrics2.append({"Parameter": f"BASE: {clean_param_name(baseline_param)}", "Peak (MW)": base_v, "Time": df_base.loc[df_base['value'].idxmax(), 'time_interval'], "Delta (MW)": 0.0, "Var (%)": 0.0})
+
+            for i, p in enumerate(selected_comp_params):
+                df_p = extract_param(df_full, p)
+                if not df_p.empty:
+                    df_p = df_p.set_index('time_interval').interpolate(method='linear').fillna(0).reset_index()
+                    fig_comp2.add_trace(go.Scatter(x=df_p['time_interval'], y=df_p['value'], name=clean_param_name(p), mode='lines', line=dict(dash='dot', color=NEA_PALETTE[i % len(NEA_PALETTE)])))
+                    p_v = df_p['value'].max()
+                    metrics2.append({"Parameter": clean_param_name(p), "Peak (MW)": p_v, "Time": df_p.loc[df_p['value'].idxmax(), 'time_interval'], "Delta (MW)": (p_v - base_v) if base_v else 0, "Var (%)": ((p_v - base_v) / base_v * 100) if base_v else 0})
 
         if metrics2:
             fig_comp2 = update_chart_layout(fig_comp2, "Parameter Overlay Analytics", legend_orientation="v")
@@ -1056,9 +1113,8 @@ with t4:
 
         for i, ym_str in enumerate(selected_comp_months):
             y, m = map(int, ym_str.split('/'))
-            df_m = run_query("SELECT nepali_day, time_interval, value FROM system_log_data WHERE parameter_name = ? AND nepali_year = ? AND nepali_month = ? AND nepali_day > 0", (comp_param, y, m))
+            df_m = get_dynamic_comparison_data(y, m, param=comp_param)
             if not df_m.empty:
-                df_m['value'] = pd.to_numeric(df_m['value'], errors='coerce').fillna(0.0).abs()
                 df_peaks = df_m.loc[df_m.groupby('nepali_day')['value'].idxmax()].sort_values('nepali_day')
                 l_name, l_dict = (f"BASE: {ym_str}", dict(width=3, color='#1e1e1e')) if i == 0 else (ym_str, dict(dash='dot', color=NEA_PALETTE[i % len(NEA_PALETTE)]))
                 fig_comp3.add_trace(go.Scatter(x=df_peaks['nepali_day'], y=df_peaks['value'], name=l_name, mode='lines+markers', line=l_dict, customdata=df_peaks['time_interval'], hovertemplate='Day %{x}<br>Peak: %{y:.2f} MW<br>Time: %{customdata}<extra></extra>'))
@@ -1083,9 +1139,8 @@ with t4:
 
         for i, ym_str in enumerate(selected_comp_months):
             y, m = map(int, ym_str.split('/'))
-            df_p = run_query("SELECT nepali_day, time_interval, value FROM system_log_data WHERE parameter_name = ? AND nepali_year = ? AND nepali_month = ? AND nepali_day > 0", (comp_param, y, m))
+            df_p = get_dynamic_comparison_data(y, m, param=comp_param)
             if not df_p.empty:
-                df_p['value'] = pd.to_numeric(df_p['value'], errors='coerce').fillna(0.0).abs()
                 df_p = df_p.sort_values(by='value', ascending=False).head(1)
                 p_v, p_d, p_t = df_p.iloc[0]['value'], df_p.iloc[0]['nepali_day'], df_p.iloc[0]['time_interval']
                 if i == 0: base_v = p_v
